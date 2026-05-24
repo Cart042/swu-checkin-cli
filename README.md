@@ -138,4 +138,5 @@ docker run --rm -v $(pwd)/users.json:/app/users.json swu-checkin-cli
 - `5`：请假中，请检查是否有打卡任务
 
 ## 致谢 / Credits
-本项目由 [Cart042](https://github.com/Cart042) 进行维护与二次开发。核心打卡逻辑与代码基于原作者 [Sorynthia/wonderful-mendeleev](https://github.com/Sorynthia/wonderful-mendeleev) 开源项目，感谢原作者的开源贡献。
+本项目由 [Cart042](https://github.com/Cart042) 进行维护与二次开发。核心打卡逻辑与代码基于原作者 [ptbb2005/swu-checkin](https://github.com/ptbb2005/swu-checkin) 
+开源项目，感谢原作者的开源贡献。
