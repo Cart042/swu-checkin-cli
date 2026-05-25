@@ -1,0 +1,10 @@
+services:
+  swu-checkin:
+    build: .
+    image: swu-checkin-cli
+    environment:
+      TZ: Asia/Shanghai
+      SWU_CONFIG_DIR: /data
+    volumes:
+      - ./data:/data
+    command: ["python", "check_in.py"]
