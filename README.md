@@ -14,6 +14,10 @@
 
 </div>
 
+## 部署位置提醒
+
+只推荐把脚本部署在中国大陆内的服务器或本地网络环境中。学校官网登录和打卡接口可能限制海外网络访问，使用 GitHub Actions、海外 VPS 或其他海外服务器时，脚本很可能无法访问学校官网，表现为登录页加载超时、连接失败或接口请求异常。
+
 ## 亮点
 
 | 能力 | 说明 |
@@ -44,6 +48,8 @@ mkdir -p data logs
 docker compose build
 docker compose run --rm -it swu-checkin python check_in.py -m
 ```
+
+VPS 建议选择中国大陆内的机房或能稳定访问学校官网的网络。不要把 GitHub Actions 当作定时运行环境，它通常位于海外网络，可能无法访问学校官网。
 
 ## 命令速查
 
@@ -139,6 +145,8 @@ docker compose run --rm -it swu-checkin python check_in.py -m
 ## 定时任务
 
 推荐在 VPS 宿主机上用 `cron` 定时调用 Docker Compose。容器保持一次性运行，配置、日志和 Token 缓存保存在宿主机目录中。
+
+定时任务建议部署在中国大陆内服务器上。GitHub Actions 和海外服务器不推荐用于本项目，因为学校官网和相关接口可能无法从海外网络稳定访问。
 
 ```bash
 mkdir -p data logs
