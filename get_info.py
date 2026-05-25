@@ -28,6 +28,14 @@ class SafeStreamHandler(logging.StreamHandler):
             self.handleError(record)
 
 logger = logging.getLogger("swu")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
+
+
+class LoginError(Exception):
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
 
 def setup_logging():
     log_level_str = os.getenv("SWU_LOG_LEVEL", "INFO").upper().strip()
@@ -56,6 +64,7 @@ def setup_logging():
     root_logger.addHandler(handler)
 
 _thread_local = threading.local()
+_token_cache_lock = threading.Lock()
 
 def get_ocr():
     if not hasattr(_thread_local, "ocr"):
@@ -82,30 +91,33 @@ def request_with_retry(method, url, max_retries=3, backoff_factor=2, session=Non
 
 def _load_cached_token(username, cache_path):
     import os
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-            return cache.get(username)
-        except Exception:
-            pass
+    with _token_cache_lock:
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+                return cache.get(username)
+            except Exception:
+                pass
     return None
 
 def _save_cached_token(username, token, cache_path):
     import os
-    cache = {}
-    if os.path.exists(cache_path):
+    with _token_cache_lock:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        cache = {}
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+            except Exception:
+                pass
+        cache[username] = token
         try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cache = json.load(f)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
-    cache[username] = token
-    try:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
 
 def extract_login_params(response):
     parsed_url = urllib.parse.urlparse(response.url)
@@ -167,7 +179,7 @@ def extract_login_params(response):
 
 def get_token(username: str, password: str, timeout=15, session=None, force_login: bool = False):
     import os
-    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".token_cache.json")
+    cache_path = os.path.join(CONFIG_DIR, ".token_cache.json")
     
     # Try cached token first (unless force_login is True)
     if not force_login:
@@ -238,17 +250,23 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                     break
                 except Exception as e:
                     if attempt == 2:
-                        raise
+                        raise LoginError("page_load", f"登录页加载失败或超时: {e}")
                     logger.warning(f"账号 {username}: 页面加载失败 (第 {attempt} 次尝试): {e}。正在重新载入...")
                     page.wait_for_timeout(2000)
 
 
             # Click "统一认证登录"
             logger.debug(f"账号 {username}: 正在点击统一认证登录按钮...")
-            page.locator('img[src*="unified_button"]').click()
+            try:
+                page.locator('img[src*="unified_button"]').click(timeout=timeout * 1000)
+            except Exception as e:
+                raise LoginError("login_page_changed", f"未找到统一认证登录按钮，登录页结构可能已变化: {e}")
 
             # Wait for loginName
-            page.wait_for_selector('input#loginName', timeout=timeout * 1000)
+            try:
+                page.wait_for_selector('input#loginName', timeout=timeout * 1000)
+            except Exception as e:
+                raise LoginError("login_page_changed", f"未找到登录表单，登录页结构可能已变化: {e}")
 
             success = False
             # Try up to 3 times to solve captcha and submit
@@ -299,7 +317,7 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                     logger.warning(f"账号 {username}: 登录页面返回错误信息: {error_msg}")
                     if any(k in error_msg for k in ["密码", "账户", "用户名", "密码错误", "不正确"]):
                         if "验证码" not in error_msg:
-                            raise Exception(f"登录失败: {error_msg}")
+                            raise LoginError("credential", f"账号或密码错误: {error_msg}")
 
                 # If not redirected and no explicit credential error, refresh captcha and try again
                 try:
@@ -310,7 +328,7 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                     pass
 
             if not success:
-                raise Exception("登录失败: 无法跳转到 of.swu.edu.cn (验证码多次识别失败或服务不可用)")
+                raise LoginError("captcha", "验证码连续识别失败，或登录服务没有完成跳转")
 
             # Extract token from localStorage
             logger.debug(f"账号 {username}: 正在从 localStorage 提取 access_token...")
@@ -344,14 +362,16 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                         pass
 
             if not token:
-                raise Exception("无法从 localStorage 中提取登录 Token")
+                raise LoginError("token_extract", "登录成功后无法从 localStorage 中提取 Token")
 
             _save_cached_token(username, token, cache_path)
             logger.debug(f"账号 {username}: Token 提取并缓存成功")
             return token
 
+        except LoginError:
+            raise
         except Exception as e:
-            raise Exception(f"获取令牌失败：{str(e)}")
+            raise LoginError("unknown", f"获取令牌失败: {str(e)}")
         finally:
             browser.close()
 
