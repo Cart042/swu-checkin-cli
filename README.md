@@ -13,6 +13,7 @@
 ├── des.py               # DES 相关逻辑
 ├── Dockerfile           # Docker 镜像构建文件
 ├── docker-compose.yml   # Docker Compose 配置
+├── FILES.md             # 仓库文件用途备注
 ├── requirements.txt     # Python 依赖
 ├── users.json.example   # 多账号配置示例
 ├── .env.example         # 环境变量配置模板
