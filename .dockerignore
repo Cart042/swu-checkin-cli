@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.token_cache.json
+.env
+users.json
+.git/
+.gitignore
