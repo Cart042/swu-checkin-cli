@@ -1,14 +1,69 @@
-# swu-checkin
+<div align="center">
 
-西南大学自动打卡命令行脚本。项目通过 Playwright 无头浏览器完成统一身份认证登录，使用 ddddocr 识别验证码，并支持多账号并发签到和多种消息推送。
+# swu-checkin-cli
+
+西南大学自动打卡命令行工具，支持多账号、Docker 部署、定时任务、数字菜单和多通道机器人推送。
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/python/)
+[![License](https://img.shields.io/github/license/Cart042/swu-checkin-cli)](LICENSE)
+[![Repo](https://img.shields.io/badge/GitHub-Cart042%2Fswu--checkin--cli-181717?logo=github)](https://github.com/Cart042/swu-checkin-cli)
+
+`python check_in.py -m` 打开数字菜单，按数字即可添加账号、配置推送、检查状态或立即运行。
+
+</div>
+
+## 亮点
+
+| 能力 | 说明 |
+| --- | --- |
+| 多账号签到 | 支持 `users.json`、环境变量和命令行临时账号，适合个人或少量账号集中管理。 |
+| 交互式菜单 | SSH 中输入 `python check_in.py -m` 即可通过数字菜单配置账号、推送、并发和缓存。 |
+| Docker 友好 | 默认使用 `/data` 保存配置、Token 缓存和运行锁，容器删除后数据不丢。 |
+| 定时任务稳妥 | 内置运行锁，避免 cron 重叠触发导致重复启动浏览器或重复签到。 |
+| 推送结果 | 支持钉钉、企业微信、Bark、Server 酱和 PushDeer。 |
+| 错误更清楚 | 对登录失败、验证码失败、接口异常、Token 失效等情况给出更细状态。 |
+
+## 快速开始
+
+```bash
+git clone https://github.com/Cart042/swu-checkin-cli.git
+cd swu-checkin-cli
+pip install -r requirements.txt
+playwright install chromium
+python check_in.py -m
+```
+
+如果你在 VPS 上部署，推荐优先使用 Docker Compose：
+
+```bash
+git clone https://github.com/Cart042/swu-checkin-cli.git
+cd swu-checkin-cli
+mkdir -p data logs
+docker compose build
+docker compose run --rm -it swu-checkin python check_in.py -m
+```
+
+## 命令速查
+
+| 场景 | 命令 |
+| --- | --- |
+| 打开数字菜单 | `python check_in.py -m` |
+| 检查配置和依赖 | `python check_in.py --check-config` |
+| 执行一次签到 | `python check_in.py` |
+| 临时指定账号 | `python check_in.py -u your_username -p your_password` |
+| 强制重新登录 | `python check_in.py --force-login` |
+| Docker 打开菜单 | `docker compose run --rm -it swu-checkin python check_in.py -m` |
+| Docker 执行一次 | `docker compose run --rm swu-checkin` |
 
 ## 文件结构
 
 ```text
 .
-├── check_in.py          # 主程序入口
-├── get_info.py          # 登录、验证码识别、Token 获取和业务接口
-├── notify.py            # 消息推送
+├── check_in.py          # 主程序入口：签到流程、菜单、配置检查、运行锁和推送汇总
+├── get_info.py          # 登录、验证码识别、Token 获取和学校接口
+├── notify.py            # 钉钉、企业微信、Bark、Server 酱、PushDeer 推送
 ├── verify.py            # 账号验证入口
 ├── des.py               # DES 相关逻辑
 ├── Dockerfile           # Docker 镜像构建文件
@@ -20,25 +75,14 @@
 └── README.md
 ```
 
-## 环境要求
-
-- Python 3.10+
-- Python 依赖：`requests`、`playwright`、`ddddocr`、`python-dotenv`
-- Linux 环境可能还需要 OpenCV/ONNX 和 Playwright 运行所需系统库，例如 `libgl1`、`libglib2.0-0`
-
-安装依赖：
-
-```bash
-pip install -r requirements.txt
-playwright install chromium
-```
+更多文件说明见 [FILES.md](FILES.md)。
 
 ## 配置账号
 
 脚本按以下优先级读取账号配置：
 
 1. 命令行参数 `-u` / `-p`
-2. 当前目录下的 `users.json`
+2. 当前配置目录下的 `users.json`
 3. 环境变量 `SWU_USERS`
 4. 环境变量 `SWU_USERNAME` / `SWU_PASSWORD`
 
@@ -55,166 +99,109 @@ playwright install chromium
 
 也可以复制 `.env.example` 为 `.env`，用环境变量配置账号、并发数和推送渠道。
 
-## 先检查配置
+## 数字菜单
 
-首次部署或修改配置后，建议先运行配置检查：
-
-```bash
-python check_in.py --check-config
-```
-
-这个命令只检查本地配置和依赖，不会登录、不会打卡、不会发送推送。它会显示：
-
-- 当前使用的账号来源和账号数量
-- Token 缓存是否存在
-- 已配置的推送渠道
-- `requests`、`playwright`、`ddddocr`、`python-dotenv` 是否可用
-- `SWU_MAX_WORKERS` 并发配置是否有效
-
-## 运行打卡
-
-使用配置文件或环境变量中的账号：
-
-```bash
-python check_in.py
-```
-
-临时指定一个账号：
-
-```bash
-python check_in.py -u your_username -p your_password
-```
-
-强制重新登录并忽略 Token 缓存：
-
-```bash
-python check_in.py --force-login
-```
-
-## 数字配置菜单
-
-如果不想手动编辑 JSON 或 `.env`，可以打开交互式数字菜单：
+不想手动编辑 JSON 或 `.env` 时，直接打开交互式菜单：
 
 ```bash
 python check_in.py -m
 ```
 
-也可以使用完整参数：
-
-```bash
-python check_in.py --menu
-```
-
 菜单支持：
 
 - 查看配置检查
-- 查看 `users.json` 中的账号
-- 添加账号
-- 删除账号
+- 查看、添加、删除账号
 - 修改账号密码
 - 设置并发线程数
-- 配置推送通道
+- 配置和测试推送通道
 - 查看配置文件路径
 - 清除 Token 缓存
-- 测试推送通道
 - 立即执行一次打卡
 
 账号密码会写入配置目录中的 `users.json`，推送配置和并发数会写入配置目录中的 `.env`。默认配置目录是脚本当前目录；Docker 中默认是 `/data`。
 
-## Docker
+## Docker 部署
 
-镜像默认从 `/data` 读取和保存配置。建议把宿主机的 `./data` 目录挂载进去，这样 `users.json`、`.env` 和 `.token_cache.json` 都会持久保存，容器删除后也不会丢。
+镜像默认从 `/data` 读取和保存配置。建议把宿主机的 `./data` 目录挂载进去，这样 `users.json`、`.env`、`.token_cache.json` 和 `.run.lock` 都会持久保存。
 
 ```bash
 mkdir -p data
-docker build -t swu-checkin-cli .
-docker run --rm -v $(pwd)/data:/data swu-checkin-cli
+docker compose build
+docker compose run --rm swu-checkin
 ```
 
 在 Docker 中打开数字菜单：
 
 ```bash
-docker run --rm -it -v $(pwd)/data:/data swu-checkin-cli python check_in.py -m
-```
-
-使用 Docker Compose：
-
-```bash
-docker compose build
-docker compose run --rm swu-checkin
 docker compose run --rm -it swu-checkin python check_in.py -m
 ```
 
 ## 定时任务
 
-推荐在 VPS 宿主机上用 `cron` 定时调用 Docker Compose。这样容器仍然是一次性运行，配置、日志和 Token 缓存保存在宿主机目录中。
-
-先创建日志目录：
+推荐在 VPS 宿主机上用 `cron` 定时调用 Docker Compose。容器保持一次性运行，配置、日志和 Token 缓存保存在宿主机目录中。
 
 ```bash
 mkdir -p data logs
-```
-
-编辑 crontab：
-
-```bash
 crontab -e
 ```
 
-示例：每天 22:10 运行一次打卡，并把日志写入 `logs/checkin.log`：
+示例：每天 22:10 运行一次，并把日志写入 `logs/checkin.log`：
 
 ```cron
-10 22 * * * cd /path/to/swu-checkin/cli && docker compose run --rm swu-checkin >> logs/checkin.log 2>&1
+10 22 * * * cd /path/to/swu-checkin-cli && docker compose run --rm swu-checkin >> logs/checkin.log 2>&1
 ```
 
-如果需要先调出菜单修改账号或推送配置：
-
-```bash
-cd /path/to/swu-checkin/cli
-docker compose run --rm -it swu-checkin python check_in.py -m
-```
-
-脚本内置运行锁，锁文件保存在配置目录的 `.run.lock`。如果上一次任务还没结束，下一次定时触发会自动跳过，避免重复启动浏览器或重复签到。默认超过 2 小时的锁会被视为过期锁并自动清理，可以通过 `SWU_LOCK_STALE_SECONDS` 调整。
+脚本内置运行锁，锁文件保存在配置目录的 `.run.lock`。如果上一次任务还没结束，下一次定时触发会自动跳过。默认超过 2 小时的锁会被视为过期锁并自动清理，可以通过 `SWU_LOCK_STALE_SECONDS` 调整。
 
 ## 推送配置
 
 在 `.env` 或运行环境中设置对应变量即可启用推送：
 
-- `PUSH_DINGTALK_TOKEN` / `PUSH_DINGTALK_SECRET`：钉钉机器人
-- `PUSH_QYWX_KEY`：企业微信群机器人
-- `PUSH_BARK_KEY` / `PUSH_BARK_URL`：Bark
-- `PUSH_SERVERCHAN_KEY`：Server 酱
-- `PUSH_PUSHDEER_KEY`：PushDeer
+| 渠道 | 环境变量 |
+| --- | --- |
+| 钉钉机器人 | `PUSH_DINGTALK_TOKEN` / `PUSH_DINGTALK_SECRET` |
+| 企业微信群机器人 | `PUSH_QYWX_KEY` |
+| Bark | `PUSH_BARK_KEY` / `PUSH_BARK_URL` |
+| Server 酱 | `PUSH_SERVERCHAN_KEY` |
+| PushDeer | `PUSH_PUSHDEER_KEY` |
 
 未配置任何推送渠道时，脚本只在日志中输出结果。
 
 ## 常用环境变量
 
-- `SWU_USERNAME`：单账号用户名
-- `SWU_PASSWORD`：单账号密码
-- `SWU_USERS`：多账号 JSON 字符串
-- `SWU_MAX_WORKERS`：最大并发线程数，默认 `3`
-- `SWU_LOG_LEVEL`：日志级别，默认 `INFO`，可选 `DEBUG` / `INFO` / `WARNING` / `ERROR`
-- `SWU_CONFIG_DIR`：配置目录，默认脚本当前目录；Docker 镜像中默认 `/data`
-- `SWU_LOCK_STALE_SECONDS`：运行锁过期时间，默认 `7200` 秒
+| 变量 | 说明 |
+| --- | --- |
+| `SWU_USERNAME` | 单账号用户名 |
+| `SWU_PASSWORD` | 单账号密码 |
+| `SWU_USERS` | 多账号 JSON 字符串 |
+| `SWU_MAX_WORKERS` | 最大并发线程数，默认 `3` |
+| `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`，可选 `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `SWU_CONFIG_DIR` | 配置目录，默认脚本当前目录；Docker 镜像中默认 `/data` |
+| `SWU_LOCK_STALE_SECONDS` | 运行锁过期时间，默认 `7200` 秒 |
 
 ## 返回状态
 
-脚本内部使用以下状态码汇总每个账号的结果：
+| 状态码 | 含义 |
+| --- | --- |
+| `0` | 今日暂无签到任务 |
+| `1` | 签到成功 |
+| `2` | 今日已签到，无需重复操作 |
+| `3` | 账号或密码验证失败 |
+| `4` | 连接错误或请求超时 |
+| `5` | 请假中，请检查是否有打卡任务 |
+| `6` | 登录页加载失败或超时，可能是学校服务或网络异常 |
+| `7` | 验证码连续识别失败 |
+| `8` | 登录成功但 Token 提取失败，可能是页面结构变化 |
+| `9` | 学校登录页结构可能变化 |
+| `10` | 学校接口返回异常，可能是服务暂时不可用 |
+| `11` | Token 校验失败或已失效，可尝试 `--force-login` |
 
-- `0`：今日暂无签到任务
-- `1`：签到成功
-- `2`：今日已签到，无需重复操作
-- `3`：账号或密码验证失败
-- `4`：连接错误或请求超时
-- `5`：请假中，请检查是否有打卡任务
-- `6`：登录页加载失败或超时，可能是学校服务或网络异常
-- `7`：验证码连续识别失败
-- `8`：登录成功但 Token 提取失败，可能是页面结构变化
-- `9`：学校登录页结构可能变化
-- `10`：学校接口返回异常，可能是服务暂时不可用
-- `11`：Token 校验失败或已失效，可尝试 `--force-login`
+## 安全提示
+
+- 不要提交真实的 `users.json`、`.env`、`.token_cache.json`。
+- VPS 上建议限制项目目录权限，只让当前部署用户可读写。
+- 如果怀疑账号或 Token 泄露，请先修改校园网密码，再删除 `.token_cache.json` 并使用 `--force-login` 重新登录。
 
 ## Credits
 
-核心打卡逻辑基于开源项目 [ptbb2005/swu-checkin](https://github.com/ptbb2005/swu-checkin)，本项目在命令行、多账号、缓存和推送体验上做了整理。
+核心打卡逻辑基于开源项目 [ptbb2005/swu-checkin](https://github.com/ptbb2005/swu-checkin)，本项目在命令行、多账号、缓存、Docker 部署和推送体验上做了整理。

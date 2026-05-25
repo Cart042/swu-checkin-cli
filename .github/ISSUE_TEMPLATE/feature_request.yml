@@ -1,0 +1,27 @@
+name: 功能建议
+description: 提出菜单、推送、部署、错误提示或其他使用体验改进。
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景
+      description: 这个功能想解决什么问题？
+      placeholder: 例如：希望菜单里可以直接查看最近一次运行日志。
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望方案
+      description: 你希望它怎么工作？
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 其他补充
+      description: 可选，填写替代方案、截图或命令示例。
+    validations:
+      required: false

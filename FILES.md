@@ -4,6 +4,10 @@
 
 | 文件 | 备注 |
 | --- | --- |
+| `.github/ISSUE_TEMPLATE/bug_report.yml` | GitHub 问题反馈模板，引导用户提交运行环境、关键日志和自查确认。 |
+| `.github/ISSUE_TEMPLATE/config.yml` | GitHub Issue 模板配置，保留空白 Issue 并提供 README 使用文档入口。 |
+| `.github/ISSUE_TEMPLATE/feature_request.yml` | GitHub 功能建议模板，引导用户说明使用场景和期望方案。 |
+| `.github/PULL_REQUEST_TEMPLATE.md` | GitHub Pull Request 模板，提醒说明变更内容、验证方式和敏感信息检查。 |
 | `.dockerignore` | Docker 构建忽略规则，防止本地账号配置、环境变量、Token 缓存、Git 元数据和 Python 缓存进入镜像。 |
 | `.env.example` | 环境变量配置模板，包含账号、并发数、日志级别和各类推送通道示例。 |
 | `.gitignore` | Git 忽略规则，防止提交 `users.json`、`.env`、`.token_cache.json` 和 Python 缓存。 |
