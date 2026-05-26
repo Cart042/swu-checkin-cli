@@ -203,7 +203,8 @@ def save_login_debug_artifacts(page, username, reason):
     try:
         os.makedirs(debug_dir, exist_ok=True)
         safe_user = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(username))[:32] or "user"
-        prefix = os.path.join(debug_dir, f"login_{safe_user}_{int(__import__('time').time())}")
+        safe_reason = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(reason))[:40] or "debug"
+        prefix = os.path.join(debug_dir, f"login_{safe_user}_{safe_reason}_{int(__import__('time').time() * 1000)}")
         page.screenshot(path=f"{prefix}.png", full_page=True)
         with open(f"{prefix}.html", "w", encoding="utf-8") as f:
             f.write(f"<!-- reason: {reason} -->\n")
@@ -235,6 +236,36 @@ def recover_from_idm_error_page(page, username, timeout):
     except Exception as exc:
         save_login_debug_artifacts(page, username, "idm_error_recovery_failed")
         raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
+
+
+def ensure_login_form(page, username, timeout):
+    for attempt in range(1, 4):
+        recover_from_idm_error_page(page, username, timeout)
+        try:
+            page.wait_for_selector('input#loginName', timeout=3000)
+            return
+        except Exception:
+            pass
+
+        button = page.locator('img[src*="unified_button"]').first
+        try:
+            if button.count() > 0:
+                logger.debug(f"账号 {username}: 正在点击统一认证登录按钮...")
+                button.click(timeout=timeout * 1000)
+                page.wait_for_timeout(1000)
+                continue
+        except Exception as exc:
+            logger.debug(f"账号 {username}: 点击统一认证登录按钮失败 (第 {attempt}/3 次): {exc}")
+
+        recover_from_idm_error_page(page, username, timeout)
+        try:
+            page.wait_for_selector('input#loginName', timeout=3000)
+            return
+        except Exception:
+            pass
+
+    save_login_debug_artifacts(page, username, "login_form_not_found")
+    raise LoginError("login_page_changed", "未找到登录表单，登录页结构可能已变化")
 
 
 def get_ocr():
@@ -578,28 +609,7 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                     logger.warning(f"账号 {username}: 页面加载失败 (第 {attempt} 次尝试): {e}。正在重新载入...")
                     page.wait_for_timeout(2000)
 
-
-            # Click "统一认证登录"
-            logger.debug(f"账号 {username}: 正在点击统一认证登录按钮...")
-            try:
-                page.locator('img[src*="unified_button"]').click(timeout=timeout * 1000)
-            except Exception as e:
-                save_login_debug_artifacts(page, username, "unified_button_not_found")
-                raise LoginError("login_page_changed", f"未找到统一认证登录按钮，登录页结构可能已变化: {e}")
-
-            # Wait for loginName
-            try:
-                page.wait_for_selector('input#loginName', timeout=timeout * 1000)
-            except Exception as e:
-                if recover_from_idm_error_page(page, username, timeout):
-                    try:
-                        page.wait_for_selector('input#loginName', timeout=timeout * 1000)
-                    except Exception as retry_exc:
-                        save_login_debug_artifacts(page, username, "login_form_not_found_after_recovery")
-                        raise LoginError("login_page_changed", f"返回登录页面后仍未找到登录表单: {retry_exc}")
-                else:
-                    save_login_debug_artifacts(page, username, "login_form_not_found")
-                    raise LoginError("login_page_changed", f"未找到登录表单，登录页结构可能已变化: {e}")
+            ensure_login_form(page, username, timeout)
 
             success = False
             # Try up to 3 times to solve captcha and submit
