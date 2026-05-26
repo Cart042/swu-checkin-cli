@@ -515,6 +515,50 @@ def _find_query_value_from_response(response, key):
     return None
 
 
+def _find_query_value_from_url(url, key):
+    parsed = urllib.parse.urlparse(url)
+    for part in [parsed.query, parsed.fragment]:
+        values = urllib.parse.parse_qs(part).get(key)
+        if values:
+            return urllib.parse.unquote(values[0])
+        if "?" in part:
+            values = urllib.parse.parse_qs(part.split("?", 1)[1]).get(key)
+            if values:
+                return urllib.parse.unquote(values[0])
+    if f"{key}=" in url:
+        return urllib.parse.unquote(url.split(f"{key}=", 1)[1].split("&", 1)[0])
+    return None
+
+
+def exchange_token_from_browser_page(page, ticket, timeout):
+    if not ticket:
+        return None
+    result = page.evaluate(
+        """async ({ ticket }) => {
+            const url = `/gateway/fighter-middle/api/integrate/uaap/cas/exchange-token?token=${encodeURIComponent(ticket)}&remember=true`;
+            const response = await fetch(url, { credentials: 'include' });
+            const text = await response.text();
+            let data = null;
+            try {
+                data = JSON.parse(text);
+            } catch (error) {
+                data = null;
+            }
+            return { ok: response.ok, status: response.status, data, text: text.slice(0, 500) };
+        }""",
+        {"ticket": ticket},
+    )
+    if not result.get("ok"):
+        logger.debug(f"浏览器 exchange-token 请求未成功：HTTP {result.get('status')} {result.get('text')}")
+        return None
+    data = result.get("data") or {}
+    token = data.get("data") or data.get("token") or data.get("access_token")
+    if token:
+        return token
+    logger.debug(f"浏览器 exchange-token 未返回 Token：{result}")
+    return None
+
+
 def _login_response_hint(response):
     parsed = urllib.parse.urlparse(response.url)
     location = f"{parsed.netloc}{parsed.path}"
@@ -786,7 +830,20 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
 
             # Extract token from localStorage
             logger.debug(f"账号 {username}: 正在从 localStorage 提取 access_token...")
-            page.wait_for_timeout(2000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=timeout * 1000)
+            except Exception:
+                page.wait_for_timeout(2000)
+
+            ticket = _find_query_value_from_url(page.url, "ticket")
+            if ticket:
+                logger.debug(f"账号 {username}: 已从跳转地址获取 CAS ticket，正在直接交换 Token...")
+                token = exchange_token_from_browser_page(page, ticket, timeout)
+                if token:
+                    _save_cached_token(username, token, cache_path)
+                    logger.debug(f"账号 {username}: 通过 CAS ticket 交换 Token 成功")
+                    return token
+
             local_storage = page.evaluate("() => JSON.stringify(localStorage)")
             ls_dict = json.loads(local_storage)
 
