@@ -267,12 +267,47 @@ def recover_from_idm_error_page(page, username, timeout, recovery_url=None):
         raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
 
 
+def click_username_password_tab(page, username, timeout):
+    tab = page.locator('text="用户名密码"').first
+    try:
+        if tab.count() > 0:
+            logger.debug(f"账号 {username}: 正在切换到用户名密码登录。")
+            tab.click(timeout=timeout * 1000)
+            page.wait_for_timeout(500)
+            return True
+    except Exception as exc:
+        logger.debug(f"账号 {username}: 切换用户名密码登录失败：{exc}")
+    return False
+
+
+def login_name_locator(page):
+    return page.locator('input#loginName, input[name="IDToken1"], input[placeholder*="用户名"], input[placeholder*="账号"]').first
+
+
+def password_locator(page):
+    return page.locator('input#password, input[name="IDToken2"], input[type="password"], input[placeholder*="密码"]').first
+
+
+def captcha_locator(page):
+    return page.locator('img#kaptchaImage, img[src*="kaptcha"], img[src*="captcha"]').first
+
+
+def captcha_input_locator(page):
+    return page.locator('input#validateCode, input[name="IDToken3"], input[placeholder*="验证码"], input[placeholder*="校验码"]').first
+
+
+def submit_button_locator(page):
+    return page.locator('input#button, button:has-text("登录"), input[type="submit"], .loginBtn, .btn-login').first
+
+
 def ensure_login_form(page, username, timeout, recovery_url=None):
     for attempt in range(1, 4):
         logger.debug(f"账号 {username}: 正在确认登录表单 (第 {attempt}/3 次)，当前 URL: {page.url}")
         recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url)
+        click_username_password_tab(page, username, timeout)
         try:
-            page.wait_for_selector('input#loginName', timeout=3000)
+            login_name_locator(page).wait_for(timeout=3000)
+            password_locator(page).wait_for(timeout=3000)
             logger.debug(f"账号 {username}: 已找到登录表单。")
             return
         except Exception:
@@ -289,8 +324,10 @@ def ensure_login_form(page, username, timeout, recovery_url=None):
             logger.debug(f"账号 {username}: 点击统一认证登录按钮失败 (第 {attempt}/3 次): {exc}")
 
         recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url)
+        click_username_password_tab(page, username, timeout)
         try:
-            page.wait_for_selector('input#loginName', timeout=3000)
+            login_name_locator(page).wait_for(timeout=3000)
+            password_locator(page).wait_for(timeout=3000)
             logger.debug(f"账号 {username}: 已找到登录表单。")
             return
         except Exception:
@@ -650,15 +687,15 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                 ensure_login_form(page, username, timeout, recovery_url=cas_url)
                 # Fill credentials
                 try:
-                    page.locator('input#loginName').fill(username, timeout=5000)
-                    page.locator('input#password').fill(password, timeout=5000)
+                    login_name_locator(page).fill(username, timeout=5000)
+                    password_locator(page).fill(password, timeout=5000)
                 except Exception as exc:
                     recover_from_idm_error_page(page, username, timeout, recovery_url=cas_url)
                     save_login_debug_artifacts(page, username, "fill_login_form_failed", exc)
                     raise LoginError("login_page_changed", f"填写登录表单失败: {exc}")
 
                 # Capture captcha image bytes
-                captcha_el = page.locator('img#kaptchaImage')
+                captcha_el = captcha_locator(page)
                 img_bytes = captcha_el.screenshot()
 
                 # Solve captcha
@@ -666,11 +703,11 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                 code = ocr.classification(img_bytes)
                 logger.debug(f"账号 {username}: 识别到验证码 = {code}")
 
-                page.locator('input[type="text"]#validateCode').fill(code)
+                captcha_input_locator(page).fill(code)
 
                 # Click login
                 logger.debug(f"账号 {username}: 提交表单中...")
-                page.locator('input#button').click()
+                submit_button_locator(page).click()
 
                 # Wait to check result
                 redirected = False
