@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       login_method:
-        description: "登录方式：direct 只用纯 HTTP；auto 失败后回退浏览器；browser 只用浏览器"
+        description: "登录方式：browser 使用当前登录页；auto 会先尝试历史 direct；direct 目前多半不可用，仅保留诊断"
         required: true
-        default: direct
+        default: browser
         type: choice
         options:
           - direct
@@ -23,6 +23,7 @@ jobs:
       SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
       SWU_LOGIN_METHOD: ${{ inputs.login_method }}
       SWU_LOG_LEVEL: INFO
+      SWU_DEBUG_DIR: debug
 
     steps:
       - name: Checkout repository
@@ -45,3 +46,11 @@ jobs:
 
       - name: Run check-in
         run: python -u check_in.py --no-lock
+
+      - name: Upload login debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-debug
+          path: debug/
+          if-no-files-found: ignore

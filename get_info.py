@@ -196,6 +196,24 @@ def has_school_proxy_config():
     return get_proxy_config() is not None
 
 
+def save_login_debug_artifacts(page, username, reason):
+    debug_dir = os.getenv("SWU_DEBUG_DIR", "").strip()
+    if not debug_dir:
+        return
+    try:
+        os.makedirs(debug_dir, exist_ok=True)
+        safe_user = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(username))[:32] or "user"
+        prefix = os.path.join(debug_dir, f"login_{safe_user}_{int(__import__('time').time())}")
+        page.screenshot(path=f"{prefix}.png", full_page=True)
+        with open(f"{prefix}.html", "w", encoding="utf-8") as f:
+            f.write(f"<!-- reason: {reason} -->\n")
+            f.write(f"<!-- url: {page.url} -->\n")
+            f.write(page.content())
+        logger.info(f"账号 {username}: 已保存登录调试快照：{prefix}.png / {prefix}.html")
+    except Exception as exc:
+        logger.warning(f"账号 {username}: 保存登录调试快照失败：{exc}")
+
+
 def get_ocr():
     if not hasattr(_thread_local, "ocr"):
         import ddddocr
@@ -543,12 +561,14 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
             try:
                 page.locator('img[src*="unified_button"]').click(timeout=timeout * 1000)
             except Exception as e:
+                save_login_debug_artifacts(page, username, "unified_button_not_found")
                 raise LoginError("login_page_changed", f"未找到统一认证登录按钮，登录页结构可能已变化: {e}")
 
             # Wait for loginName
             try:
                 page.wait_for_selector('input#loginName', timeout=timeout * 1000)
             except Exception as e:
+                save_login_debug_artifacts(page, username, "login_form_not_found")
                 raise LoginError("login_page_changed", f"未找到登录表单，登录页结构可能已变化: {e}")
 
             success = False

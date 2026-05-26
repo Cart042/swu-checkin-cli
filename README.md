@@ -27,7 +27,7 @@
 | 多账号签到 | 支持 `users.json`、环境变量和命令行临时账号，适合个人或少量账号集中管理。 |
 | 交互式菜单 | SSH 中输入 `python check_in.py -m` 即可通过数字菜单配置账号、推送、并发、缓存和学校官网代理。 |
 | Docker 友好 | 默认使用 `/data` 保存配置、Token 缓存和运行锁，容器删除后数据不丢。 |
-| 双登录链路 | 默认先尝试纯 HTTP 登录，失败后回退浏览器登录，兼顾 GitHub Actions 友好性和页面变化兼容性。 |
+| 双登录链路 | 支持历史纯 HTTP 登录和浏览器登录；原始项目已说明历史登录接口不可用，当前以浏览器链路为主。 |
 | 定时任务稳妥 | 内置运行锁，避免 cron 重叠触发导致重复启动浏览器或重复签到。 |
 | 推送结果 | 支持钉钉、企业微信、Bark、Server 酱和 PushDeer。 |
 | 错误更清楚 | 对登录失败、验证码失败、接口异常、Token 失效等情况给出更细状态。 |
@@ -133,17 +133,18 @@ python check_in.py -m
 
 ## 海外服务器运行方式
 
-海外服务器能否运行取决于两件事：学校认证接口是否仍允许纯 HTTP 登录链路，以及服务器是否有可用的学校官网网络路径。
+海外服务器能否运行取决于两件事：服务器是否能访问学校官网，以及当前学校登录页结构是否能被浏览器链路识别。
 
 登录链路默认使用 `SWU_LOGIN_METHOD=auto`：
 
-1. 先尝试纯 HTTP 登录。这条链路来自原始项目思路，不启动浏览器、不识别验证码，更适合 GitHub Actions 或轻量服务器。
+1. 先尝试历史纯 HTTP 登录。这条链路来自原始项目思路，不启动浏览器、不识别验证码，但原始项目已说明该登录接口不可用。
 2. 如果纯 HTTP 登录失败，再回退到 Playwright 浏览器登录。
 
-如果你想专门测试 GitHub Actions 友好的纯 HTTP 链路，可以设置：
+如果你要在 GitHub Actions 中排查当前页面结构，建议使用：
 
 ```bash
-SWU_LOGIN_METHOD=direct
+SWU_LOGIN_METHOD=browser
+SWU_DEBUG_DIR=debug
 ```
 
 网络路径按以下顺序处理：
@@ -181,14 +182,14 @@ python check_in.py -m
 
 ## GitHub Actions 手动运行
 
-仓库提供了手动触发的 workflow：`.github/workflows/swu-check.yml`。它默认使用 `SWU_LOGIN_METHOD=direct`，也就是纯 HTTP 登录链路，尽量贴近原始项目能在 GitHub Actions 中运行的方式。
+仓库提供了手动触发的 workflow：`.github/workflows/swu-check.yml`。它默认使用 `SWU_LOGIN_METHOD=browser`，并在登录页元素识别失败时上传 `login-debug` artifact，里面包含截图和 HTML，便于定位 GitHub Actions 上实际打开的页面。
 
 使用前需要在 GitHub 仓库 `Settings` -> `Secrets and variables` -> `Actions` 中添加：
 
 - `SWU_USERNAME`
 - `SWU_PASSWORD`
 
-然后进入 `Actions` -> `swu-check manual run` -> `Run workflow` 手动触发。登录方式建议先选 `direct`；如果学校接口策略变化导致 direct 失败，再尝试 `auto` 或回到 VPS/Docker 部署。
+然后进入 `Actions` -> `swu-check manual run` -> `Run workflow` 手动触发。登录方式建议先选 `browser`。如果失败，请在运行详情里下载 `login-debug` artifact，再根据截图和 HTML 判断是否是页面结构变化、验证码策略变化或账号认证异常。
 
 不建议默认开启定时 schedule。GitHub Actions 的运行环境和出口网络可能变化，也不适合长期保存校园账号、密码和 Token。
 
@@ -257,6 +258,7 @@ crontab -e
 | `SWU_PROXY_USERNAME` | 学校官网代理用户名，无认证可留空 |
 | `SWU_PROXY_PASSWORD` | 学校官网代理密码，无认证可留空 |
 | `SWU_PROXY_MODE` | 代理模式，默认 `auto`；设为 `manual` 时只读取 `SWU_PROXY_URL`，设为 `off` 时禁用代理 |
+| `SWU_DEBUG_DIR` | 登录调试快照目录，设置后在浏览器登录页面元素识别失败时保存截图和 HTML |
 
 ## 返回状态
 

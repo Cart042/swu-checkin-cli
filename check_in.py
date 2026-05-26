@@ -373,8 +373,8 @@ def run_config_check(cli_username=None, cli_password=None):
         print(f"[WARN] 登录方式：SWU_LOGIN_METHOD={login_method} 无效，将按 auto 处理")
     else:
         method_hint = {
-            "auto": "先尝试纯 HTTP 登录，失败后回退浏览器登录",
-            "direct": "只使用纯 HTTP 登录，适合测试 GitHub Actions 友好链路",
+            "auto": "先尝试历史纯 HTTP 登录，失败后回退浏览器登录",
+            "direct": "只使用历史纯 HTTP 登录；该接口可能已不可用，主要用于诊断",
             "browser": "只使用浏览器登录",
         }[login_method]
         print(f"[OK] 登录方式：{login_method}（{method_hint}）")
