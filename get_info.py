@@ -292,21 +292,6 @@ def captcha_locator(page):
     return page.locator('img#kaptchaImage, img[src*="kaptcha"], img[src*="captcha"]').first
 
 
-def save_captcha_debug(username, attempt, img_bytes, code):
-    debug_dir = os.getenv("SWU_DEBUG_DIR", "").strip()
-    if not debug_dir:
-        return
-    try:
-        os.makedirs(debug_dir, exist_ok=True)
-        safe_user = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(username))[:32] or "user"
-        path = os.path.join(debug_dir, f"captcha_{safe_user}_{attempt}_{int(__import__('time').time() * 1000)}_{code}.png")
-        with open(path, "wb") as f:
-            f.write(img_bytes)
-        logger.info(f"账号 {username}: 已保存验证码调试图片：{path}")
-    except Exception as exc:
-        logger.warning(f"账号 {username}: 保存验证码调试图片失败：{exc}")
-
-
 def get_captcha_image_bytes(page, captcha_el, timeout):
     captcha_el.wait_for(state="visible", timeout=timeout * 1000)
     page.wait_for_timeout(500)
@@ -780,7 +765,6 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                 ocr = get_ocr()
                 code = ocr.classification(img_bytes)
                 logger.debug(f"账号 {username}: 识别到验证码 = {code}")
-                save_captcha_debug(username, attempt + 1, img_bytes, code)
 
                 captcha_input_locator(page).fill(code)
 
