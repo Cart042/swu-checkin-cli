@@ -107,6 +107,7 @@ LOGIN_REASON_STATUS = {
     "captcha": 7,
     "token_extract": 8,
     "login_page_changed": 9,
+    "direct_login": 10,
 }
 
 for stream in (sys.stdout, sys.stderr):
@@ -346,7 +347,7 @@ def run_config_check(cli_username=None, cli_password=None):
         except Exception as exc:
             print(f"[WARN] Token 缓存：文件存在但无法读取，后续会自动重新登录 ({exc})")
     else:
-        print("[INFO] Token 缓存：未发现，首次运行会通过浏览器登录")
+        print("[INFO] Token 缓存：未发现，首次运行会按登录方式获取 Token")
 
     channels = configured_push_channels()
     if channels:
@@ -366,6 +367,17 @@ def run_config_check(cli_username=None, cli_password=None):
         print(f"[FAIL] 学校官网代理：{proxy_err}")
     else:
         print(f"[OK] 学校官网代理：{proxy_description}")
+
+    login_method = os.getenv("SWU_LOGIN_METHOD", "auto").strip().lower() or "auto"
+    if login_method not in {"auto", "direct", "browser"}:
+        print(f"[WARN] 登录方式：SWU_LOGIN_METHOD={login_method} 无效，将按 auto 处理")
+    else:
+        method_hint = {
+            "auto": "先尝试纯 HTTP 登录，失败后回退浏览器登录",
+            "direct": "只使用纯 HTTP 登录，适合测试 GitHub Actions 友好链路",
+            "browser": "只使用浏览器登录",
+        }[login_method]
+        print(f"[OK] 登录方式：{login_method}（{method_hint}）")
 
     if REQUESTS_IMPORT_ERROR is None:
         connectivity_ok, connectivity_msg = check_school_connectivity(timeout=5)

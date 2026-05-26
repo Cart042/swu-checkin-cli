@@ -1,0 +1,47 @@
+name: swu-check manual run
+
+on:
+  workflow_dispatch:
+    inputs:
+      login_method:
+        description: "登录方式：direct 只用纯 HTTP；auto 失败后回退浏览器；browser 只用浏览器"
+        required: true
+        default: direct
+        type: choice
+        options:
+          - direct
+          - auto
+          - browser
+
+jobs:
+  check-in:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+      SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
+      SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
+      SWU_LOGIN_METHOD: ${{ inputs.login_method }}
+      SWU_LOG_LEVEL: INFO
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Chromium for browser fallback
+        if: ${{ inputs.login_method != 'direct' }}
+        run: playwright install chromium
+
+      - name: Check configuration
+        run: python check_in.py --check-config
+
+      - name: Run check-in
+        run: python -u check_in.py --no-lock

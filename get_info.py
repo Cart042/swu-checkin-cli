@@ -307,6 +307,97 @@ def extract_login_params(response):
                 
     return goto, realm, service, state
 
+
+def _transform_ticket(ticket):
+    ticket_parts = urllib.parse.unquote(ticket).split("-")
+    if len(ticket_parts) < 3:
+        raise LoginError("direct_login", "统一认证返回的 ticket 格式异常")
+
+    str1 = ""
+    str2 = ""
+    for char in ticket_parts[1]:
+        str1 += str((int(char) + 5) % 10)
+    for char in ticket_parts[2]:
+        if "0" <= char <= "9":
+            str2 += str((int(char) + 5) % 10)
+        elif "A" <= char <= "Z":
+            str2 += chr(ord(char) + 10 - 26 if ord(char) + 10 > ord("Z") else ord(char) + 10)
+        else:
+            str2 += chr(ord(char) + 15 - 26 if ord(char) + 15 > ord("z") else ord(char) + 15)
+    return str1, str2
+
+
+def get_token_direct(username: str, password: str, timeout=15, session=None):
+    session = apply_proxy_to_session(session or requests.Session())
+    encrypted_username, encrypted_password = des(username, password)
+    data = {
+        "IDToken1": encrypted_username,
+        "IDToken2": encrypted_password,
+        "IDToken3": "",
+        "goto": "aHR0cDovL2lkbS5zd3UuZWR1LmNuL2FtL29hdXRoMi9hdXRob3JpemU/c2VydmljZT1pbml0U2VydmljZSZyZXNwb25zZV90eXBlPWNvZGUmY2xpZW50X2lkPTdjMXpva29samw5YmJpaG82eXVvJnNjb3BlPXVpZCtjbit1c2VySWRDb2RlJnJlZGlyZWN0X3VyaT1odHRwcyUzQSUyRiUyRnVhYWFwLnN3dS5lZHUuY24lMkZjYXMlMkZsb2dpbiUzRnNlcnZpY2UlM0RodHRwcyUyNTNBJTI1MkYlMjUyRnVhYWFwLnN3dS5lZHUuY24lMjUyRmNhcyUyNTJGb2F1dGgyLjAlMjUyRmNhbGxiYWNrQXV0aG9yaXplJTI2b3JpZ2luYWxSZXF1ZXN0VXJsJTNEaHR0cHMlMjUzQSUyNTJGJTI1MkZ1YWFhcC5zd3UuZWR1LmNuJTI1MkZjYXMlMjUyRm9hdXRoMi4wJTI1MkZhdXRob3JpemUlMjUzRnJlc3BvbnNlX3R5cGUlMjUzRGNvZGUlMjUyNmNsaWVudF9pZCUyNTNEY2FzNiUyNTI2cmVkaXJlY3RfdXJpJTI1M0RodHRwcyUyNTI1M0ElMjUyNTJGJTI1MjUyRm9mLnN3dS5lZHUuY24lMjUyNTNBNDQzJTI1MjUyRmNhcyUyNTI1MkZvYXV0aCUyNTI1MkZjYWxsYmFjayUyNTI1MkZTV1VfQ0FTMl9GRURFUkFMJTI1MjZzdGF0ZSUyNTNEZTFlMTczODhlNzU4MjY3YjFiNzI2ZjM4Mjg0NDM5MWElMjUyNnNjb3BlJTI1M0RzaW1wbGUlMjZmZWRlcmFsRW5hYmxlJTNEdHJ1ZSZkZWNpc2lvbj1BbGxvdw==",
+        "gotoOnFail": "",
+        "sunQueryParamsString": "cmVhbG09LyZzZXJ2aWNlPWluaXRTZXJ2aWNlJg==",
+        "encoded": "true",
+        "gx_charset": "UTF-8",
+    }
+    cas_url = (
+        "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
+        "?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Ffighter-middle"
+        "%2Fapi%2Fintegrate%2Fuaap%2Fcas%2Fresolve-cas-return"
+        "%3Fnext%3Dhttps%253A%252F%252Fof.swu.edu.cn"
+        "%252F%2523%252FcasLogin%253Ffrom%253D%25252FappCenter"
+    )
+
+    try:
+        response = request_with_retry("GET", cas_url, timeout=timeout, session=session)
+        state_match = re.search(
+            r"state=([a-f0-9]{32})",
+            urllib.parse.unquote(urllib.parse.unquote(response.url)),
+        )
+        if not state_match:
+            raise LoginError("direct_login", "CAS 跳转地址中没有找到 state 参数")
+        state = state_match.group(1)
+
+        response = request_with_retry(
+            "POST",
+            "https://idm.swu.edu.cn/am/UI/Login",
+            data=data,
+            allow_redirects=True,
+            timeout=timeout,
+            session=session,
+        )
+        if "ticket=" not in response.url:
+            raise LoginError("credential", "统一认证未返回 ticket，可能是账号密码错误或接口策略变化")
+        ticket = response.url.split("ticket=", 1)[1]
+
+        str1, str2 = _transform_ticket(ticket)
+        code = f"CD-{str1}-{str2}-wiie://777.643.675.751:3537/rph"
+        callback_url = urllib.parse.unquote(
+            f"https://of.swu.edu.cn/cas/oauth/callback/SWU_CAS2_FEDERAL?code={code}@@hxbeat&state={state}"
+        )
+        response = request_with_retry("GET", callback_url, allow_redirects=True, timeout=timeout, session=session)
+        if "ticket=" not in response.url:
+            raise LoginError("direct_login", "CAS 回调后没有获取到 ST ticket")
+        st_ticket = response.url.split("ticket=", 1)[1]
+
+        token_response = request_with_retry(
+            "GET",
+            f"https://of.swu.edu.cn/gateway/fighter-middle/api/integrate/uaap/cas/exchange-token?token={st_ticket}&remember=true",
+            timeout=timeout,
+            session=session,
+        ).json()
+        token = token_response.get("data")
+        if not token:
+            raise LoginError("token_extract", f"交换 Token 失败：{token_response}")
+        return token
+    except LoginError:
+        raise
+    except requests.exceptions.RequestException as exc:
+        raise LoginError("page_load", f"纯 HTTP 登录链路请求失败: {exc}")
+    except Exception as exc:
+        raise LoginError("direct_login", f"纯 HTTP 登录链路失败: {exc}")
+
+
 def get_token(username: str, password: str, timeout=15, session=None, force_login: bool = False):
     import os
     cache_path = os.path.join(CONFIG_DIR, ".token_cache.json")
@@ -325,6 +416,23 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
             logger.info(f"账号 {username}: 未发现缓存的 Token，正在通过浏览器登录...")
     else:
         logger.info(f"账号 {username}: 收到强制登录参数，跳过缓存，正在通过浏览器登录...")
+
+    login_method = os.getenv("SWU_LOGIN_METHOD", "auto").strip().lower()
+    if login_method not in {"auto", "direct", "browser"}:
+        logger.warning(f"账号 {username}: SWU_LOGIN_METHOD={login_method} 无效，将使用 auto。")
+        login_method = "auto"
+
+    if login_method in {"auto", "direct"}:
+        try:
+            logger.info(f"账号 {username}: 正在尝试纯 HTTP 登录链路...")
+            token = get_token_direct(username, password, timeout=timeout, session=session)
+            _save_cached_token(username, token, cache_path)
+            logger.info(f"账号 {username}: 纯 HTTP 登录成功，Token 已缓存。")
+            return token
+        except LoginError as exc:
+            if login_method == "direct":
+                raise
+            logger.warning(f"账号 {username}: 纯 HTTP 登录失败，将回退到浏览器登录：{exc}")
 
     cas_url = (
         "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
