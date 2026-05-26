@@ -631,6 +631,7 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                     pass
 
             if not success:
+                save_login_debug_artifacts(page, username, "captcha_or_redirect_failed")
                 raise LoginError("captcha", "验证码连续识别失败，或登录服务没有完成跳转")
 
             # Extract token from localStorage
@@ -665,15 +666,18 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                         pass
 
             if not token:
+                save_login_debug_artifacts(page, username, "token_extract_failed")
                 raise LoginError("token_extract", "登录成功后无法从 localStorage 中提取 Token")
 
             _save_cached_token(username, token, cache_path)
             logger.debug(f"账号 {username}: Token 提取并缓存成功")
             return token
 
-        except LoginError:
+        except LoginError as exc:
+            save_login_debug_artifacts(page, username, getattr(exc, "reason", "login_error"))
             raise
         except Exception as e:
+            save_login_debug_artifacts(page, username, "unexpected_browser_error")
             raise LoginError("unknown", f"获取令牌失败: {str(e)}")
         finally:
             browser.close()

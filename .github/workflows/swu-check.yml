@@ -29,6 +29,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Prepare debug directory
+        run: mkdir -p debug
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -46,6 +49,10 @@ jobs:
 
       - name: Run check-in
         run: python -u check_in.py --no-lock
+
+      - name: List debug files
+        if: always()
+        run: find debug -maxdepth 2 -type f -print || true
 
       - name: Upload login debug artifacts
         if: always()
