@@ -19,9 +19,12 @@ except ImportError as exc:
         )
 
     def describe_proxy_config():
+        mode = os.getenv("SWU_PROXY_MODE", "auto").strip().lower()
+        if mode in {"off", "false", "0", "none", "disable", "disabled"}:
+            return "未配置"
         proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
         source = "SWU_PROXY_URL"
-        if not proxy_url and os.getenv("SWU_PROXY_MODE", "auto").strip().lower() != "manual":
+        if not proxy_url and mode != "manual":
             for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
                 value = os.getenv(key, "").strip()
                 if value:
@@ -34,8 +37,11 @@ except ImportError as exc:
         return f"{visible}（来源：{source}）"
 
     def validate_proxy_config():
+        mode = os.getenv("SWU_PROXY_MODE", "auto").strip().lower()
+        if mode in {"off", "false", "0", "none", "disable", "disabled"}:
+            return True, None
         proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
-        if not proxy_url and os.getenv("SWU_PROXY_MODE", "auto").strip().lower() != "manual":
+        if not proxy_url and mode != "manual":
             for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
                 value = os.getenv(key, "").strip()
                 if value:
