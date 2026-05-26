@@ -327,8 +327,46 @@ def _transform_ticket(ticket):
     return str1, str2
 
 
+def _find_query_value_from_response(response, key):
+    candidates = [response]
+    candidates.extend(getattr(response, "history", []) or [])
+    for item in candidates:
+        parsed = urllib.parse.urlparse(item.url)
+        values = urllib.parse.parse_qs(parsed.query).get(key)
+        if values:
+            return values[0]
+        if f"{key}=" in item.url:
+            return item.url.split(f"{key}=", 1)[1].split("&", 1)[0]
+    return None
+
+
+def _login_response_hint(response):
+    parsed = urllib.parse.urlparse(response.url)
+    location = f"{parsed.netloc}{parsed.path}"
+    history_count = len(getattr(response, "history", []) or [])
+    text = getattr(response, "text", "") or ""
+    error_hints = []
+    for pattern in [
+        r"(用户名或密码[^<\n\r]+)",
+        r"(账号或密码[^<\n\r]+)",
+        r"(密码错误[^<\n\r]*)",
+        r"(验证码[^<\n\r]+)",
+        r"(认证失败[^<\n\r]*)",
+        r"(登录失败[^<\n\r]*)",
+    ]:
+        match = re.search(pattern, text)
+        if match:
+            error_hints.append(match.group(1).strip())
+    suffix = f"，页面提示：{'; '.join(error_hints[:2])}" if error_hints else ""
+    return f"HTTP {response.status_code}，最终地址 {location}，重定向 {history_count} 次{suffix}"
+
+
 def get_token_direct(username: str, password: str, timeout=15, session=None):
     session = apply_proxy_to_session(session or requests.Session())
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
     encrypted_username, encrypted_password = des(username, password)
     data = {
         "IDToken1": encrypted_username,
@@ -366,9 +404,9 @@ def get_token_direct(username: str, password: str, timeout=15, session=None):
             timeout=timeout,
             session=session,
         )
-        if "ticket=" not in response.url:
-            raise LoginError("credential", "统一认证未返回 ticket，可能是账号密码错误或接口策略变化")
-        ticket = response.url.split("ticket=", 1)[1]
+        ticket = _find_query_value_from_response(response, "ticket")
+        if not ticket:
+            raise LoginError("credential", f"统一认证未返回 ticket，可能是账号密码错误或接口策略变化（{_login_response_hint(response)}）")
 
         str1, str2 = _transform_ticket(ticket)
         code = f"CD-{str1}-{str2}-wiie://777.643.675.751:3537/rph"
@@ -376,9 +414,9 @@ def get_token_direct(username: str, password: str, timeout=15, session=None):
             f"https://of.swu.edu.cn/cas/oauth/callback/SWU_CAS2_FEDERAL?code={code}@@hxbeat&state={state}"
         )
         response = request_with_retry("GET", callback_url, allow_redirects=True, timeout=timeout, session=session)
-        if "ticket=" not in response.url:
-            raise LoginError("direct_login", "CAS 回调后没有获取到 ST ticket")
-        st_ticket = response.url.split("ticket=", 1)[1]
+        st_ticket = _find_query_value_from_response(response, "ticket")
+        if not st_ticket:
+            raise LoginError("direct_login", f"CAS 回调后没有获取到 ST ticket（{_login_response_hint(response)}）")
 
         token_response = request_with_retry(
             "GET",
@@ -413,9 +451,9 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
             except Exception:
                 logger.info(f"账号 {username}: 缓存的 Token 已失效，正在通过浏览器重新登录...")
         else:
-            logger.info(f"账号 {username}: 未发现缓存的 Token，正在通过浏览器登录...")
+            logger.info(f"账号 {username}: 未发现缓存的 Token，正在获取新 Token...")
     else:
-        logger.info(f"账号 {username}: 收到强制登录参数，跳过缓存，正在通过浏览器登录...")
+        logger.info(f"账号 {username}: 收到强制登录参数，跳过缓存，正在获取新 Token...")
 
     login_method = os.getenv("SWU_LOGIN_METHOD", "auto").strip().lower()
     if login_method not in {"auto", "direct", "browser"}:
