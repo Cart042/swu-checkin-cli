@@ -214,6 +214,29 @@ def save_login_debug_artifacts(page, username, reason):
         logger.warning(f"账号 {username}: 保存登录调试快照失败：{exc}")
 
 
+def recover_from_idm_error_page(page, username, timeout):
+    try:
+        body_text = page.locator("body").inner_text(timeout=2000)
+    except Exception:
+        body_text = ""
+    if "动态口令验证失败" not in body_text and "验证失败" not in body_text:
+        return False
+
+    logger.warning(f"账号 {username}: 统一认证页面提示验证失败，尝试返回登录页面继续。")
+    try:
+        link = page.locator('a:has-text("返回至登录页面")').first
+        href = link.get_attribute("href", timeout=3000)
+        if href:
+            page.goto(urllib.parse.urljoin(page.url, href), wait_until="networkidle", timeout=timeout * 1000)
+        else:
+            link.click(timeout=timeout * 1000)
+            page.wait_for_load_state("networkidle", timeout=timeout * 1000)
+        return True
+    except Exception as exc:
+        save_login_debug_artifacts(page, username, "idm_error_recovery_failed")
+        raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
+
+
 def get_ocr():
     if not hasattr(_thread_local, "ocr"):
         import ddddocr
@@ -568,8 +591,15 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
             try:
                 page.wait_for_selector('input#loginName', timeout=timeout * 1000)
             except Exception as e:
-                save_login_debug_artifacts(page, username, "login_form_not_found")
-                raise LoginError("login_page_changed", f"未找到登录表单，登录页结构可能已变化: {e}")
+                if recover_from_idm_error_page(page, username, timeout):
+                    try:
+                        page.wait_for_selector('input#loginName', timeout=timeout * 1000)
+                    except Exception as retry_exc:
+                        save_login_debug_artifacts(page, username, "login_form_not_found_after_recovery")
+                        raise LoginError("login_page_changed", f"返回登录页面后仍未找到登录表单: {retry_exc}")
+                else:
+                    save_login_debug_artifacts(page, username, "login_form_not_found")
+                    raise LoginError("login_page_changed", f"未找到登录表单，登录页结构可能已变化: {e}")
 
             success = False
             # Try up to 3 times to solve captcha and submit
