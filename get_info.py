@@ -292,6 +292,40 @@ def captcha_locator(page):
     return page.locator('img#kaptchaImage, img[src*="kaptcha"], img[src*="captcha"]').first
 
 
+def save_captcha_debug(username, attempt, img_bytes, code):
+    debug_dir = os.getenv("SWU_DEBUG_DIR", "").strip()
+    if not debug_dir:
+        return
+    try:
+        os.makedirs(debug_dir, exist_ok=True)
+        safe_user = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(username))[:32] or "user"
+        path = os.path.join(debug_dir, f"captcha_{safe_user}_{attempt}_{int(__import__('time').time() * 1000)}_{code}.png")
+        with open(path, "wb") as f:
+            f.write(img_bytes)
+        logger.info(f"账号 {username}: 已保存验证码调试图片：{path}")
+    except Exception as exc:
+        logger.warning(f"账号 {username}: 保存验证码调试图片失败：{exc}")
+
+
+def get_captcha_image_bytes(page, captcha_el, timeout):
+    captcha_el.wait_for(state="visible", timeout=timeout * 1000)
+    page.wait_for_timeout(500)
+    try:
+        handle = captcha_el.element_handle(timeout=timeout * 1000)
+        if handle:
+            src = handle.get_attribute("src") or ""
+            if src.startswith("data:image"):
+                encoded = src.split(",", 1)[1]
+                return base64.b64decode(encoded)
+            if src:
+                response = page.request.get(urllib.parse.urljoin(page.url, src), timeout=timeout * 1000)
+                if response.ok:
+                    return response.body()
+    except Exception as exc:
+        logger.debug(f"验证码图片请求获取失败，回退元素截图：{exc}")
+    return captcha_el.screenshot(timeout=timeout * 1000)
+
+
 def captcha_input_locator(page):
     return page.locator('input#validateCode, input[name="IDToken3"], input[placeholder*="验证码"], input[placeholder*="校验码"]').first
 
@@ -696,12 +730,13 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
 
                 # Capture captcha image bytes
                 captcha_el = captcha_locator(page)
-                img_bytes = captcha_el.screenshot()
+                img_bytes = get_captcha_image_bytes(page, captcha_el, timeout)
 
                 # Solve captcha
                 ocr = get_ocr()
                 code = ocr.classification(img_bytes)
                 logger.debug(f"账号 {username}: 识别到验证码 = {code}")
+                save_captcha_debug(username, attempt + 1, img_bytes, code)
 
                 captcha_input_locator(page).fill(code)
 
