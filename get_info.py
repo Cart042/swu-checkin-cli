@@ -237,7 +237,7 @@ def save_login_debug_artifacts(page, username, reason, error=None):
         logger.warning(f"账号 {username}: 保存登录调试快照失败：{exc}")
 
 
-def recover_from_idm_error_page(page, username, timeout):
+def recover_from_idm_error_page(page, username, timeout, recovery_url=None):
     try:
         body_text = page.locator("body").inner_text(timeout=2000)
     except Exception:
@@ -245,16 +245,21 @@ def recover_from_idm_error_page(page, username, timeout):
     if "动态口令验证失败" not in body_text and "验证失败" not in body_text:
         return False
 
-    logger.warning(f"账号 {username}: 统一认证页面提示验证失败，尝试返回登录页面继续。")
+    logger.warning(f"账号 {username}: 统一认证页面提示验证失败，尝试重新打开登录入口。")
     try:
-        link = page.locator('a:has-text("返回至登录页面")').first
-        href = link.get_attribute("href", timeout=3000)
-        if href:
-            logger.debug(f"账号 {username}: 返回登录页面链接：{href[:200]}")
-            page.goto(urllib.parse.urljoin(page.url, href), wait_until="networkidle", timeout=timeout * 1000)
+        if recovery_url:
+            page.goto(recovery_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            page.wait_for_timeout(2000)
         else:
-            link.click(timeout=timeout * 1000)
-            page.wait_for_load_state("networkidle", timeout=timeout * 1000)
+            link = page.locator('a:has-text("返回至登录页面")').first
+            href = link.get_attribute("href", timeout=3000)
+            if href:
+                logger.debug(f"账号 {username}: 返回登录页面链接：{href[:200]}")
+                page.goto(urllib.parse.urljoin(page.url, href), wait_until="domcontentloaded", timeout=timeout * 1000)
+            else:
+                link.click(timeout=timeout * 1000)
+                page.wait_for_load_state("domcontentloaded", timeout=timeout * 1000)
+            page.wait_for_timeout(2000)
         logger.debug(f"账号 {username}: 返回登录页面后 URL: {page.url}")
         return True
     except Exception as exc:
@@ -262,10 +267,10 @@ def recover_from_idm_error_page(page, username, timeout):
         raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
 
 
-def ensure_login_form(page, username, timeout):
+def ensure_login_form(page, username, timeout, recovery_url=None):
     for attempt in range(1, 4):
         logger.debug(f"账号 {username}: 正在确认登录表单 (第 {attempt}/3 次)，当前 URL: {page.url}")
-        recover_from_idm_error_page(page, username, timeout)
+        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url)
         try:
             page.wait_for_selector('input#loginName', timeout=3000)
             logger.debug(f"账号 {username}: 已找到登录表单。")
@@ -283,7 +288,7 @@ def ensure_login_form(page, username, timeout):
         except Exception as exc:
             logger.debug(f"账号 {username}: 点击统一认证登录按钮失败 (第 {attempt}/3 次): {exc}")
 
-        recover_from_idm_error_page(page, username, timeout)
+        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url)
         try:
             page.wait_for_selector('input#loginName', timeout=3000)
             logger.debug(f"账号 {username}: 已找到登录表单。")
@@ -636,15 +641,21 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                     logger.warning(f"账号 {username}: 页面加载失败 (第 {attempt} 次尝试): {e}。正在重新载入...")
                     page.wait_for_timeout(2000)
 
-            ensure_login_form(page, username, timeout)
+            ensure_login_form(page, username, timeout, recovery_url=cas_url)
 
             success = False
             # Try up to 3 times to solve captcha and submit
             for attempt in range(3):
                 logger.debug(f"账号 {username}: 正在填写登录表单并识别验证码 (尝试 {attempt + 1}/3)...")
+                ensure_login_form(page, username, timeout, recovery_url=cas_url)
                 # Fill credentials
-                page.locator('input#loginName').fill(username)
-                page.locator('input#password').fill(password)
+                try:
+                    page.locator('input#loginName').fill(username, timeout=5000)
+                    page.locator('input#password').fill(password, timeout=5000)
+                except Exception as exc:
+                    recover_from_idm_error_page(page, username, timeout, recovery_url=cas_url)
+                    save_login_debug_artifacts(page, username, "fill_login_form_failed", exc)
+                    raise LoginError("login_page_changed", f"填写登录表单失败: {exc}")
 
                 # Capture captcha image bytes
                 captcha_el = page.locator('img#kaptchaImage')
