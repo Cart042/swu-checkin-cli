@@ -18,6 +18,47 @@ except ImportError as exc:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
+    def describe_proxy_config():
+        proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
+        source = "SWU_PROXY_URL"
+        if not proxy_url and os.getenv("SWU_PROXY_MODE", "auto").strip().lower() != "manual":
+            for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
+                value = os.getenv(key, "").strip()
+                if value:
+                    proxy_url = value
+                    source = key
+                    break
+        if not proxy_url:
+            return "未配置"
+        visible = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
+        return f"{visible}（来源：{source}）"
+
+    def validate_proxy_config():
+        proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
+        if not proxy_url and os.getenv("SWU_PROXY_MODE", "auto").strip().lower() != "manual":
+            for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
+                value = os.getenv(key, "").strip()
+                if value:
+                    proxy_url = value
+                    break
+        if not proxy_url:
+            return True, None
+        if "://" not in proxy_url:
+            proxy_url = f"http://{proxy_url}"
+        scheme = proxy_url.split("://", 1)[0].lower()
+        if scheme not in {"http", "https", "socks4", "socks5"}:
+            return False, f"不支持的代理协议：{scheme}，请使用 http、https、socks4 或 socks5"
+        return True, None
+
+    def apply_proxy_to_session(session):
+        return session
+
+    def check_school_connectivity(timeout=5):
+        return False, f"依赖未加载，无法检查学校官网连通性：{GET_INFO_IMPORT_ERROR}"
+
+    def has_school_proxy_config():
+        return describe_proxy_config() != "未配置"
+
 try:
     import requests
     REQUESTS_IMPORT_ERROR = None
@@ -71,6 +112,7 @@ for stream in (sys.stdout, sys.stderr):
 
 def check_in(username: str, password: str, timeout: int = 10, force_login: bool = False):
     session = requests.Session()
+    apply_proxy_to_session(session)
 
     def vacation_enable(token, timeout, session):
         headers = {
@@ -306,8 +348,31 @@ def run_config_check(cli_username=None, cli_password=None):
     else:
         print("[INFO] 推送配置：未配置，运行结束后只输出日志")
 
+    try:
+        proxy_description = describe_proxy_config()
+        proxy_ok, proxy_err = validate_proxy_config()
+    except Exception as exc:
+        proxy_description = f"读取失败 ({exc})"
+        proxy_ok, proxy_err = False, str(exc)
+    if proxy_description == "未配置":
+        print("[INFO] 学校官网代理：未配置，直接访问学校接口")
+    elif not proxy_ok:
+        print(f"[FAIL] 学校官网代理：{proxy_err}")
+    else:
+        print(f"[OK] 学校官网代理：{proxy_description}")
+
+    if REQUESTS_IMPORT_ERROR is None:
+        connectivity_ok, connectivity_msg = check_school_connectivity(timeout=5)
+        if connectivity_ok:
+            print(f"[OK] 学校官网连通性：{connectivity_msg}")
+        else:
+            print(f"[WARN] 学校官网连通性：{connectivity_msg}")
+            if proxy_description == "未配置":
+                print("       如果服务器在海外，通常需要让服务器已有的 HTTPS_PROXY/ALL_PROXY 指向中国大陆代理出口，或在菜单中配置 SWU_PROXY_URL。")
+
     deps = [
         ("requests", "requests"),
+        ("PySocks", "socks"),
         ("playwright", "playwright.sync_api"),
         ("ddddocr", "ddddocr"),
         ("python-dotenv", "dotenv"),
@@ -332,7 +397,7 @@ def run_config_check(cli_username=None, cli_password=None):
         for err in errors:
             print(f"- {err}")
 
-    if accounts and deps_ok and not errors:
+    if accounts and deps_ok and not errors and proxy_ok:
         print("\n配置检查通过。")
         return 0
 
@@ -388,6 +453,30 @@ def set_env_value(key, value):
         if updated and updated[-1].strip():
             updated.append("")
         updated.append(f"{key}={value}")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(updated).rstrip() + "\n")
+
+
+def unset_env_value(*keys):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    for key in keys:
+        os.environ.pop(key, None)
+    path = env_config_path()
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    key_set = set(keys)
+    updated = []
+    for line in lines:
+        stripped = line.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            name = stripped.split("=", 1)[0].strip()
+            if name in key_set:
+                continue
+        updated.append(line)
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(updated).rstrip() + "\n")
@@ -524,6 +613,40 @@ def menu_set_push():
         print("无效选项。")
 
 
+def menu_set_proxy():
+    print("\n学校官网代理配置")
+    print("用于海外 VPS 通过中国大陆代理出口访问学校官网。")
+    print("支持 http://、https://、socks5:// 形式；如果省略协议，默认按 http:// 处理。")
+    print(f"当前配置：{describe_proxy_config()}")
+    print("1. 设置或修改代理")
+    print("2. 清除代理配置")
+    print("0. 返回")
+    choice = input("请选择：").strip()
+
+    if choice == "1":
+        proxy_url = prompt_non_empty("SWU_PROXY_URL（例如 http://1.2.3.4:7890）：")
+        username = input("SWU_PROXY_USERNAME（无认证可留空）：").strip()
+        password = ""
+        if username:
+            password = prompt_password("SWU_PROXY_PASSWORD：")
+        set_env_value("SWU_PROXY_URL", proxy_url)
+        set_env_value("SWU_PROXY_USERNAME", username)
+        set_env_value("SWU_PROXY_PASSWORD", password)
+        print(f"已保存学校官网代理配置：{describe_proxy_config()}")
+        print("下次运行打卡时，浏览器登录和学校接口请求都会使用该代理。")
+    elif choice == "2":
+        confirm = input("确认清除学校官网代理配置？输入 yes 确认：").strip().lower()
+        if confirm != "yes":
+            print("已取消清除。")
+            return
+        unset_env_value("SWU_PROXY_URL", "SWU_PROXY_USERNAME", "SWU_PROXY_PASSWORD")
+        print("已清除学校官网代理配置。")
+    elif choice == "0":
+        return
+    else:
+        print("无效选项。")
+
+
 def menu_show_paths():
     paths = [
         ("配置目录", CONFIG_DIR),
@@ -592,6 +715,7 @@ def run_menu():
         print("9. 清除 Token 缓存")
         print("10. 测试推送通道")
         print("11. 立即执行一次打卡")
+        print("12. 配置学校官网代理")
         print("0. 退出")
 
         try:
@@ -628,6 +752,9 @@ def run_menu():
                 pause_menu()
             elif choice == "11":
                 menu_run_checkin_once()
+                pause_menu()
+            elif choice == "12":
+                menu_set_proxy()
                 pause_menu()
             elif choice == "0":
                 print("已退出菜单。")
@@ -716,6 +843,24 @@ if __name__ == "__main__":
         logger.error(f"依赖加载失败：{missing}")
         logger.error("请先安装依赖，或运行 --check-config 查看当前环境状态。")
         raise SystemExit(1)
+
+    proxy_ok, proxy_err = validate_proxy_config()
+    if not proxy_ok:
+        logger.error(f"学校官网代理配置无效：{proxy_err}")
+        raise SystemExit(1)
+
+    connectivity_ok, connectivity_msg = check_school_connectivity(timeout=5)
+    if connectivity_ok:
+        logger.info(f"学校官网连通性检查通过：{connectivity_msg}")
+    else:
+        logger.warning(f"学校官网连通性检查失败：{connectivity_msg}")
+        if has_school_proxy_config():
+            logger.warning("已检测到代理配置，请检查代理出口是否位于中国大陆内、代理地址是否可达、认证信息是否正确。")
+        else:
+            logger.error("当前没有可用的学校官网代理配置，且直连学校官网失败。")
+            logger.error("如果服务器在海外且服务端也不提供任何中国大陆出口、代理或隧道，脚本无法凭空访问学校官网。")
+            logger.error("请换用中国大陆内服务器运行，或提供一个可信的中国大陆网络出口。")
+            raise SystemExit(1)
 
     run_lock_path = None
     if not args.no_lock:

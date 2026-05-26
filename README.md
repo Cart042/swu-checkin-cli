@@ -16,14 +16,16 @@
 
 ## 部署位置提醒
 
-只推荐把脚本部署在中国大陆内的服务器或本地网络环境中。学校官网登录和打卡接口可能限制海外网络访问，使用 GitHub Actions、海外 VPS 或其他海外服务器时，脚本很可能无法访问学校官网，表现为登录页加载超时、连接失败或接口请求异常。
+推荐把脚本部署在中国大陆内的服务器或本地网络环境中。学校官网登录和打卡接口可能限制海外网络访问，海外 VPS 直接运行时很可能无法访问学校官网，表现为登录页加载超时、连接失败或接口请求异常。
+
+如果必须部署在海外服务器上，需要有一个能访问学校官网的中国大陆网络出口。脚本会自动尝试直连学校官网，也会自动读取服务器已有的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 环境变量；如果这些都没有，且学校官网无法直连，脚本无法凭空访问学校官网。
 
 ## 亮点
 
 | 能力 | 说明 |
 | --- | --- |
 | 多账号签到 | 支持 `users.json`、环境变量和命令行临时账号，适合个人或少量账号集中管理。 |
-| 交互式菜单 | SSH 中输入 `python check_in.py -m` 即可通过数字菜单配置账号、推送、并发和缓存。 |
+| 交互式菜单 | SSH 中输入 `python check_in.py -m` 即可通过数字菜单配置账号、推送、并发、缓存和学校官网代理。 |
 | Docker 友好 | 默认使用 `/data` 保存配置、Token 缓存和运行锁，容器删除后数据不丢。 |
 | 定时任务稳妥 | 内置运行锁，避免 cron 重叠触发导致重复启动浏览器或重复签到。 |
 | 推送结果 | 支持钉钉、企业微信、Bark、Server 酱和 PushDeer。 |
@@ -49,7 +51,7 @@ docker compose build
 docker compose run --rm -it swu-checkin python check_in.py -m
 ```
 
-VPS 建议选择中国大陆内的机房或能稳定访问学校官网的网络。不要把 GitHub Actions 当作定时运行环境，它通常位于海外网络，可能无法访问学校官网。
+VPS 建议选择中国大陆内的机房或能稳定访问学校官网的网络。如果使用海外 VPS，需要服务器本身能直连学校官网，或已有可信的中国大陆代理出口。不要把 GitHub Actions 当作定时运行环境，它通常位于海外网络，且不适合保存长期账号配置。
 
 ## 命令速查
 
@@ -120,11 +122,47 @@ python check_in.py -m
 - 修改账号密码
 - 设置并发线程数
 - 配置和测试推送通道
+- 配置学校官网代理
 - 查看配置文件路径
 - 清除 Token 缓存
 - 立即执行一次打卡
 
 账号密码会写入配置目录中的 `users.json`，推送配置和并发数会写入配置目录中的 `.env`。默认配置目录是脚本当前目录；Docker 中默认是 `/data`。
+
+## 海外服务器运行方式
+
+海外服务器能否运行取决于它是否有可用的学校官网网络路径。脚本会按以下顺序处理：
+
+1. 先尝试直接访问学校官网。
+2. 自动读取服务器已有的标准代理变量：`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`。
+3. 如果你手动配置了 `SWU_PROXY_URL`，则优先使用它。
+
+如果服务器无法直连学校官网，也没有任何可用代理或隧道，脚本无法凭空绕过网络限制。出于账号安全考虑，本项目不会内置公共代理池。
+
+如需手动指定可信代理，可配置：
+
+```bash
+SWU_PROXY_URL=http://proxy.example.com:7890
+SWU_PROXY_USERNAME=
+SWU_PROXY_PASSWORD=
+```
+
+也可以通过数字菜单配置：
+
+```bash
+python check_in.py -m
+```
+
+进入菜单后选择“配置学校官网代理”。Docker Compose 部署时，代理配置会写入挂载的 `./data/.env`，后续定时任务会自动读取。
+
+说明：
+
+- `SWU_PROXY_URL` 优先级高于服务器已有的 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。
+- `SWU_PROXY_URL` 支持 `http://`、`https://`、`socks4://`、`socks5://` 形式；省略协议时按 `http://` 处理。
+- `SWU_PROXY_USERNAME` / `SWU_PROXY_PASSWORD` 仅在代理需要认证时填写。
+- 标准代理环境变量和 `SWU_PROXY_URL` 都只用于学校官网登录和学校接口请求；推送通道仍按各平台网络情况直接访问。
+- 完全不提供中国大陆服务器、代理、隧道或可直连学校官网的网络时，海外服务器无法完成登录和打卡。
+- GitHub Actions 不推荐用于本项目。即使配置代理，也不适合在 GitHub Actions 中长期保存校园账号、密码、Token 或机器人 Key。
 
 ## Docker 部署
 
@@ -146,7 +184,7 @@ docker compose run --rm -it swu-checkin python check_in.py -m
 
 推荐在 VPS 宿主机上用 `cron` 定时调用 Docker Compose。容器保持一次性运行，配置、日志和 Token 缓存保存在宿主机目录中。
 
-定时任务建议部署在中国大陆内服务器上。GitHub Actions 和海外服务器不推荐用于本项目，因为学校官网和相关接口可能无法从海外网络稳定访问。
+定时任务建议部署在中国大陆内服务器上。海外服务器需要确认能直连学校官网，或已有可信中国大陆代理出口后再运行。GitHub Actions 不推荐用于本项目，因为它通常位于海外网络，且不适合保存长期账号、密码和 Token。
 
 ```bash
 mkdir -p data logs
@@ -186,6 +224,10 @@ crontab -e
 | `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`，可选 `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `SWU_CONFIG_DIR` | 配置目录，默认脚本当前目录；Docker 镜像中默认 `/data` |
 | `SWU_LOCK_STALE_SECONDS` | 运行锁过期时间，默认 `7200` 秒 |
+| `SWU_PROXY_URL` | 学校官网代理地址，海外 VPS 运行时可填写中国大陆代理出口 |
+| `SWU_PROXY_USERNAME` | 学校官网代理用户名，无认证可留空 |
+| `SWU_PROXY_PASSWORD` | 学校官网代理密码，无认证可留空 |
+| `SWU_PROXY_MODE` | 代理模式，默认 `auto`；设为 `manual` 时只读取 `SWU_PROXY_URL`，设为 `off` 时禁用代理 |
 
 ## 返回状态
 

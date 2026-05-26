@@ -65,6 +65,136 @@ def setup_logging():
 
 _thread_local = threading.local()
 _token_cache_lock = threading.Lock()
+SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
+STANDARD_PROXY_ENV_KEYS = (
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+)
+
+def _proxy_url_with_auth(proxy_url, username="", password=""):
+    if not proxy_url or not username:
+        return proxy_url
+    parsed = urllib.parse.urlparse(proxy_url)
+    if parsed.username:
+        return proxy_url
+    netloc = parsed.netloc or parsed.path
+    if not netloc:
+        return proxy_url
+    auth = urllib.parse.quote(username, safe="")
+    if password:
+        auth += f":{urllib.parse.quote(password, safe='')}"
+    if parsed.netloc:
+        return urllib.parse.urlunparse(parsed._replace(netloc=f"{auth}@{netloc}"))
+    return f"{parsed.scheme}://{auth}@{netloc}"
+
+
+def get_proxy_config():
+    mode = os.getenv("SWU_PROXY_MODE", "auto").strip().lower()
+    if mode in {"off", "false", "0", "none", "disable", "disabled"}:
+        return None
+    proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
+    source = "SWU_PROXY_URL"
+    if not proxy_url and mode != "manual":
+        for key in STANDARD_PROXY_ENV_KEYS:
+            value = os.getenv(key, "").strip()
+            if value:
+                proxy_url = value
+                source = key
+                break
+    if not proxy_url:
+        return None
+    if "://" not in proxy_url:
+        proxy_url = f"http://{proxy_url}"
+    username = os.getenv("SWU_PROXY_USERNAME", "").strip()
+    password = os.getenv("SWU_PROXY_PASSWORD", "").strip()
+    return {
+        "server": proxy_url,
+        "scheme": urllib.parse.urlparse(proxy_url).scheme.lower(),
+        "username": username,
+        "password": password,
+        "requests_url": _proxy_url_with_auth(proxy_url, username, password),
+        "source": source,
+    }
+
+
+def validate_proxy_config():
+    proxy = get_proxy_config()
+    if not proxy:
+        return True, None
+    parsed = urllib.parse.urlparse(proxy["server"])
+    if parsed.scheme.lower() not in SUPPORTED_PROXY_SCHEMES:
+        return False, f"不支持的代理协议：{parsed.scheme}，请使用 http、https、socks4 或 socks5"
+    if not parsed.hostname:
+        return False, "代理地址缺少主机名或 IP"
+    return True, None
+
+
+def mask_proxy_url(proxy_url):
+    if not proxy_url:
+        return ""
+    parsed = urllib.parse.urlparse(proxy_url)
+    if not parsed.netloc:
+        return proxy_url
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    return urllib.parse.urlunparse(parsed._replace(netloc=f"{host}{port}"))
+
+
+def describe_proxy_config():
+    proxy = get_proxy_config()
+    if not proxy:
+        return "未配置"
+    auth_hint = "，已配置认证" if proxy.get("username") else ""
+    return f"{mask_proxy_url(proxy['server'])}{auth_hint}（来源：{proxy.get('source', 'unknown')}）"
+
+
+def apply_proxy_to_session(session):
+    session.trust_env = False
+    proxy = get_proxy_config()
+    if proxy:
+        session.proxies.update({
+            "http": proxy["requests_url"],
+            "https": proxy["requests_url"],
+        })
+    return session
+
+
+def playwright_proxy_options():
+    proxy = get_proxy_config()
+    if not proxy:
+        return None
+    options = {"server": proxy["server"]}
+    if proxy.get("username"):
+        options["username"] = proxy["username"]
+    if proxy.get("password"):
+        options["password"] = proxy["password"]
+    return options
+
+
+def check_school_connectivity(timeout=5):
+    session = apply_proxy_to_session(requests.Session())
+    try:
+        response = session.get("https://of.swu.edu.cn/", timeout=timeout)
+        return True, f"HTTP {response.status_code}"
+    except requests.exceptions.ProxyError as exc:
+        return False, f"代理连接失败：{exc}"
+    except requests.exceptions.SSLError as exc:
+        return False, f"TLS/证书连接失败：{exc}"
+    except requests.exceptions.Timeout as exc:
+        return False, f"连接学校官网超时：{exc}"
+    except requests.exceptions.ConnectionError as exc:
+        return False, f"无法连接学校官网：{exc}"
+    except requests.exceptions.RequestException as exc:
+        return False, f"请求学校官网失败：{exc}"
+
+
+def has_school_proxy_config():
+    return get_proxy_config() is not None
+
 
 def get_ocr():
     if not hasattr(_thread_local, "ocr"):
@@ -74,7 +204,7 @@ def get_ocr():
 
 def request_with_retry(method, url, max_retries=3, backoff_factor=2, session=None, **kwargs):
     import time
-    client = session or requests
+    client = session or apply_proxy_to_session(requests.Session())
     for attempt in range(1, max_retries + 1):
         try:
             response = client.request(method, url, **kwargs)
@@ -206,9 +336,9 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
 
     logger.debug(f"账号 {username}: 正在启动 Playwright Chromium 浏览器...")
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
+        launch_options = {
+            "headless": True,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-gpu",
@@ -216,6 +346,13 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                 "--no-first-run",
                 "--password-store=basic"
             ]
+        }
+        proxy_options = playwright_proxy_options()
+        if proxy_options:
+            launch_options["proxy"] = proxy_options
+            logger.info(f"账号 {username}: 浏览器登录将使用代理：{describe_proxy_config()}")
+        browser = p.chromium.launch(
+            **launch_options
         )
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
