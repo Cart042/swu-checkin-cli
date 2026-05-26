@@ -1,17 +1,24 @@
-name: swu-check manual run
+name: SWU Check-in
 
 on:
+  schedule:
+    # 每天北京时间 21:05 自动运行。GitHub cron 使用 UTC 时间。
+    - cron: "5 13 * * *"
   workflow_dispatch:
     inputs:
       login_method:
-        description: "登录方式：browser 使用当前登录页；auto 会先尝试历史 direct；direct 目前多半不可用，仅保留诊断"
+        description: "登录方式：browser 使用当前登录页；auto 会先尝试历史 direct；direct 目前多半不可用，仅保留诊断。"
         required: true
         default: browser
         type: choice
         options:
-          - direct
-          - auto
           - browser
+          - auto
+          - direct
+
+concurrency:
+  group: swu-check-in
+  cancel-in-progress: false
 
 jobs:
   check-in:
@@ -21,8 +28,8 @@ jobs:
       TZ: Asia/Shanghai
       SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
       SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
-      SWU_LOGIN_METHOD: ${{ inputs.login_method }}
-      SWU_LOG_LEVEL: DEBUG
+      SWU_LOGIN_METHOD: ${{ github.event_name == 'workflow_dispatch' && inputs.login_method || 'browser' }}
+      SWU_LOG_LEVEL: INFO
       SWU_DEBUG_DIR: debug
 
     steps:
@@ -40,8 +47,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Chromium for browser fallback
-        if: ${{ inputs.login_method != 'direct' }}
+      - name: Install Chromium for browser login
+        if: ${{ env.SWU_LOGIN_METHOD != 'direct' }}
         run: playwright install chromium
 
       - name: Check configuration
