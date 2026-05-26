@@ -22,7 +22,7 @@ jobs:
       SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
       SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
       SWU_LOGIN_METHOD: ${{ inputs.login_method }}
-      SWU_LOG_LEVEL: INFO
+      SWU_LOG_LEVEL: DEBUG
       SWU_DEBUG_DIR: debug
 
     steps:

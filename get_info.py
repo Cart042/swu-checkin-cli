@@ -196,7 +196,7 @@ def has_school_proxy_config():
     return get_proxy_config() is not None
 
 
-def save_login_debug_artifacts(page, username, reason):
+def save_login_debug_artifacts(page, username, reason, error=None):
     debug_dir = os.getenv("SWU_DEBUG_DIR", "").strip()
     if not debug_dir:
         return
@@ -205,12 +205,34 @@ def save_login_debug_artifacts(page, username, reason):
         safe_user = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(username))[:32] or "user"
         safe_reason = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(reason))[:40] or "debug"
         prefix = os.path.join(debug_dir, f"login_{safe_user}_{safe_reason}_{int(__import__('time').time() * 1000)}")
+        try:
+            title = page.title()
+        except Exception:
+            title = ""
+        try:
+            body_text = page.locator("body").inner_text(timeout=1000)
+        except Exception:
+            body_text = ""
+        body_preview = re.sub(r"\s+", " ", body_text).strip()[:1000]
         page.screenshot(path=f"{prefix}.png", full_page=True)
         with open(f"{prefix}.html", "w", encoding="utf-8") as f:
             f.write(f"<!-- reason: {reason} -->\n")
             f.write(f"<!-- url: {page.url} -->\n")
+            if title:
+                f.write(f"<!-- title: {title} -->\n")
+            if error is not None:
+                f.write(f"<!-- error_type: {type(error).__name__} -->\n")
+                f.write(f"<!-- error: {str(error).replace('--', '- -')[:1000]} -->\n")
             f.write(page.content())
-        logger.info(f"账号 {username}: 已保存登录调试快照：{prefix}.png / {prefix}.html")
+        with open(f"{prefix}.txt", "w", encoding="utf-8") as f:
+            f.write(f"reason: {reason}\n")
+            f.write(f"url: {page.url}\n")
+            f.write(f"title: {title}\n")
+            if error is not None:
+                f.write(f"error_type: {type(error).__name__}\n")
+                f.write(f"error: {error}\n")
+            f.write(f"body_preview: {body_preview}\n")
+        logger.info(f"账号 {username}: 已保存登录调试快照：{prefix}.png / {prefix}.html / {prefix}.txt")
     except Exception as exc:
         logger.warning(f"账号 {username}: 保存登录调试快照失败：{exc}")
 
@@ -228,21 +250,25 @@ def recover_from_idm_error_page(page, username, timeout):
         link = page.locator('a:has-text("返回至登录页面")').first
         href = link.get_attribute("href", timeout=3000)
         if href:
+            logger.debug(f"账号 {username}: 返回登录页面链接：{href[:200]}")
             page.goto(urllib.parse.urljoin(page.url, href), wait_until="networkidle", timeout=timeout * 1000)
         else:
             link.click(timeout=timeout * 1000)
             page.wait_for_load_state("networkidle", timeout=timeout * 1000)
+        logger.debug(f"账号 {username}: 返回登录页面后 URL: {page.url}")
         return True
     except Exception as exc:
-        save_login_debug_artifacts(page, username, "idm_error_recovery_failed")
+        save_login_debug_artifacts(page, username, "idm_error_recovery_failed", exc)
         raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
 
 
 def ensure_login_form(page, username, timeout):
     for attempt in range(1, 4):
+        logger.debug(f"账号 {username}: 正在确认登录表单 (第 {attempt}/3 次)，当前 URL: {page.url}")
         recover_from_idm_error_page(page, username, timeout)
         try:
             page.wait_for_selector('input#loginName', timeout=3000)
+            logger.debug(f"账号 {username}: 已找到登录表单。")
             return
         except Exception:
             pass
@@ -260,6 +286,7 @@ def ensure_login_form(page, username, timeout):
         recover_from_idm_error_page(page, username, timeout)
         try:
             page.wait_for_selector('input#loginName', timeout=3000)
+            logger.debug(f"账号 {username}: 已找到登录表单。")
             return
         except Exception:
             pass
@@ -714,10 +741,16 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
             return token
 
         except LoginError as exc:
-            save_login_debug_artifacts(page, username, getattr(exc, "reason", "login_error"))
+            save_login_debug_artifacts(page, username, getattr(exc, "reason", "login_error"), exc)
             raise
         except Exception as e:
-            save_login_debug_artifacts(page, username, "unexpected_browser_error")
+            try:
+                body_text = page.locator("body").inner_text(timeout=1000)
+            except Exception:
+                body_text = ""
+            save_login_debug_artifacts(page, username, "unexpected_browser_error", e)
+            if "动态口令验证失败" in body_text or "验证失败" in body_text:
+                raise LoginError("login_page_changed", f"统一认证错误页未能恢复到登录表单: {e}")
             raise LoginError("unknown", f"获取令牌失败: {str(e)}")
         finally:
             browser.close()
