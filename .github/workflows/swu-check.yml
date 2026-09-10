@@ -27,6 +27,15 @@ jobs:
       TZ: Asia/Shanghai
       SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
       SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
+      PUSH_DINGTALK_TOKEN: ${{ secrets.PUSH_DINGTALK_TOKEN }}
+      PUSH_DINGTALK_SECRET: ${{ secrets.PUSH_DINGTALK_SECRET }}
+      PUSH_QYWX_KEY: ${{ secrets.PUSH_QYWX_KEY }}
+      PUSH_BARK_KEY: ${{ secrets.PUSH_BARK_KEY }}
+      PUSH_BARK_URL: ${{ secrets.PUSH_BARK_URL }}
+      PUSH_SERVERCHAN_KEY: ${{ secrets.PUSH_SERVERCHAN_KEY }}
+      PUSH_PUSHDEER_KEY: ${{ secrets.PUSH_PUSHDEER_KEY }}
+      PUSH_TELEGRAM_BOT_TOKEN: ${{ secrets.PUSH_TELEGRAM_BOT_TOKEN }}
+      PUSH_TELEGRAM_CHAT_ID: ${{ secrets.PUSH_TELEGRAM_CHAT_ID }}
       SWU_LOG_LEVEL: INFO
       SWU_RUN_DEADLINE_SECONDS: "900"
       SWU_DEBUG_DIR: ${{ inputs.debug == true && 'debug' || '' }}

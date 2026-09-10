@@ -8,6 +8,7 @@ import tempfile
 import contextlib
 import re
 import errno
+import importlib.util
 
 try:
     from get_info import (
@@ -15,16 +16,14 @@ try:
         SwuBusinessError,
         SwuRequestError,
         TokenInvalidError,
-        apply_proxy_to_session,
         check_school_connectivity,
-        describe_proxy_config,
+        create_school_session,
         get_dormitory,
         get_student_id,
         get_token,
         get_transition_today,
         request_with_retry,
         setup_logging,
-        validate_proxy_config,
     )
     GET_INFO_IMPORT_ERROR = None
 except ImportError as exc:
@@ -37,45 +36,12 @@ except ImportError as exc:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-    def describe_proxy_config():
-        mode = os.getenv("SWU_PROXY_MODE", "auto").strip().lower()
-        if mode in {"off", "false", "0", "none", "disable", "disabled"}:
-            return "未配置"
-        proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
-        source = "SWU_PROXY_URL"
-        if not proxy_url and mode != "manual":
-            for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
-                value = os.getenv(key, "").strip()
-                if value:
-                    proxy_url = value
-                    source = key
-                    break
-        if not proxy_url:
-            return "未配置"
-        visible = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
-        return f"{visible}（来源：{source}）"
-
-    def validate_proxy_config():
-        mode = os.getenv("SWU_PROXY_MODE", "auto").strip().lower()
-        if mode in {"off", "false", "0", "none", "disable", "disabled"}:
-            return True, None
-        proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
-        if not proxy_url and mode != "manual":
-            for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
-                value = os.getenv(key, "").strip()
-                if value:
-                    proxy_url = value
-                    break
-        if not proxy_url:
-            return True, None
-        if "://" not in proxy_url:
-            proxy_url = f"http://{proxy_url}"
-        scheme = proxy_url.split("://", 1)[0].lower()
-        if scheme not in {"http", "https", "socks4", "socks5"}:
-            return False, f"不支持的代理协议：{scheme}，请使用 http、https、socks4 或 socks5"
-        return True, None
-
-    def apply_proxy_to_session(session):
+    def create_school_session():
+        """Create a direct school API session when get_info is unavailable."""
+        if requests is None:
+            raise GET_INFO_IMPORT_ERROR
+        session = requests.Session()
+        session.trust_env = False
         return session
 
     def check_school_connectivity(timeout=5):
@@ -112,8 +78,7 @@ CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
 # Load environment variables from .env file if it exists
 try:
     from dotenv import load_dotenv
-    # Values written by the menu are quoted and must remain literal. In
-    # particular, a proxy secret containing ``${...}`` must not be expanded.
+    # Values written by the menu are quoted and must remain literal.
     load_dotenv(os.path.join(CONFIG_DIR, ".env"), interpolate=False)
 except ImportError:
     pass
@@ -354,8 +319,7 @@ def check_in(username: str, password: str, timeout: int = 10, force_login: bool 
     if requests is None:
         logger.error("requests 依赖未安装")
         return 10
-    session = requests.Session()
-    apply_proxy_to_session(session)
+    session = create_school_session()
     try:
         try:
             token = get_token(
@@ -471,14 +435,32 @@ def configured_push_channels():
     for env_name, channel_name in env_to_name:
         if os.getenv(env_name, "").strip():
             channels.append(channel_name)
+    if os.getenv("PUSH_TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("PUSH_TELEGRAM_CHAT_ID", "").strip():
+        channels.append("Telegram")
     return channels
+
+
+def push_configuration_errors():
+    """Return actionable errors for channels that have incomplete settings."""
+    token = os.getenv("PUSH_TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("PUSH_TELEGRAM_CHAT_ID", "").strip()
+    if token and not chat_id:
+        return ["Telegram 推送缺少 PUSH_TELEGRAM_CHAT_ID。"]
+    if chat_id and not token:
+        return ["Telegram 推送缺少 PUSH_TELEGRAM_BOT_TOKEN。"]
+    return []
 
 
 def check_dependency(name, import_name=None):
     if name == "requests" and REQUESTS_IMPORT_ERROR is not None:
         return False, str(REQUESTS_IMPORT_ERROR)
     try:
-        __import__(import_name or name)
+        module_name = import_name or name
+        # ``find_spec`` checks installation metadata without importing a
+        # potentially expensive runtime module (notably ddddocr/OCR data).
+        spec = importlib.util.find_spec(module_name)
+        if spec is None:
+            return False, f"找不到模块 {module_name}"
         return True, None
     except Exception as exc:
         return False, str(exc)
@@ -554,23 +536,15 @@ def run_config_check(cli_username=None, cli_password=None):
         print("[INFO] Token 缓存：未发现，首次运行会按登录方式获取 Token")
 
     channels = configured_push_channels()
+    push_errors = push_configuration_errors()
     if channels:
         print(f"[OK] 推送配置：已配置 {', '.join(channels)}")
-    else:
+    if push_errors:
+        for push_error in push_errors:
+            print(f"[FAIL] 推送配置：{push_error}")
+    if not channels and not push_errors:
         print("[INFO] 推送配置：未配置，运行结束后只输出日志")
-
-    try:
-        proxy_description = describe_proxy_config()
-        proxy_ok, proxy_err = validate_proxy_config()
-    except Exception as exc:
-        proxy_description = f"读取失败 ({exc})"
-        proxy_ok, proxy_err = False, str(exc)
-    if proxy_description == "未配置":
-        print("[INFO] 学校官网代理：未配置，直接访问学校接口")
-    elif not proxy_ok:
-        print(f"[FAIL] 学校官网代理：{proxy_err}")
-    else:
-        print(f"[OK] 学校官网代理：{proxy_description}")
+    errors.extend(push_errors)
 
     if REQUESTS_IMPORT_ERROR is None:
         connectivity_ok, connectivity_msg = check_school_connectivity(timeout=5)
@@ -582,12 +556,14 @@ def run_config_check(cli_username=None, cli_password=None):
 
     deps = [
         ("requests", "requests"),
-        ("PySocks", "socks"),
         ("playwright", "playwright.sync_api"),
         ("ddddocr", "ddddocr"),
         ("python-dotenv", "dotenv"),
     ]
     deps_ok = True
+    if GET_INFO_IMPORT_ERROR is not None:
+        deps_ok = False
+        print(f"[FAIL] 核心模块：get_info 加载失败 ({GET_INFO_IMPORT_ERROR})")
     for label, import_name in deps:
         ok, err = check_dependency(label, import_name)
         if ok:
@@ -613,7 +589,7 @@ def run_config_check(cli_username=None, cli_password=None):
         for err in errors:
             print(f"- {err}")
 
-    if accounts and deps_ok and not errors and proxy_ok:
+    if accounts and deps_ok and not errors:
         print("\n配置检查通过。")
         return 0
 
@@ -811,6 +787,7 @@ def menu_set_push():
     print("3. Bark")
     print("4. Server 酱")
     print("5. PushDeer")
+    print("6. Telegram")
     print("0. 返回")
     choice = input("请选择：").strip()
 
@@ -838,43 +815,39 @@ def menu_set_push():
         key = prompt_non_empty("PUSH_PUSHDEER_KEY：")
         set_env_value("PUSH_PUSHDEER_KEY", key)
         print("已保存 PushDeer 推送配置。")
+    elif choice == "6":
+        menu_set_telegram()
     elif choice == "0":
         return
     else:
         print("无效选项。")
 
 
-def menu_set_proxy():
-    print("\n学校官网代理配置")
-    print("用于海外 VPS 通过中国大陆代理出口访问学校官网。")
-    print("支持 http://、https://、socks5:// 形式；如果省略协议，默认按 http:// 处理。")
-    print(f"当前配置：{describe_proxy_config()}")
-    print("1. 设置或修改代理")
-    print("2. 清除代理配置")
+def menu_set_telegram():
+    """Set or clear the Telegram bot credentials without sending a message."""
+    token_configured = bool(os.getenv("PUSH_TELEGRAM_BOT_TOKEN", "").strip())
+    chat_configured = bool(os.getenv("PUSH_TELEGRAM_CHAT_ID", "").strip())
+    if token_configured or chat_configured:
+        print("\nTelegram 当前已有配置。")
+    print("1. 设置或修改 Telegram")
+    print("2. 清除 Telegram 配置")
     print("0. 返回")
     choice = input("请选择：").strip()
 
     if choice == "1":
-        proxy_url = prompt_non_empty("SWU_PROXY_URL（例如 http://1.2.3.4:7890）：")
-        username = input("SWU_PROXY_USERNAME（无认证可留空）：").strip()
-        password = ""
-        if username:
-            password = prompt_password("SWU_PROXY_PASSWORD：")
-        set_env_value("SWU_PROXY_URL", proxy_url)
-        set_env_value("SWU_PROXY_USERNAME", username)
-        set_env_value("SWU_PROXY_PASSWORD", password)
-        print(f"已保存学校官网代理配置：{describe_proxy_config()}")
-        print("下次运行打卡时，浏览器登录和学校接口请求都会使用该代理。")
+        token = prompt_password("PUSH_TELEGRAM_BOT_TOKEN：")
+        chat_id = prompt_non_empty("PUSH_TELEGRAM_CHAT_ID：")
+        set_env_value("PUSH_TELEGRAM_BOT_TOKEN", token)
+        set_env_value("PUSH_TELEGRAM_CHAT_ID", chat_id)
+        print("已保存 Telegram 推送配置。")
     elif choice == "2":
-        confirm = input("确认清除学校官网代理配置？输入 yes 确认：").strip().lower()
+        confirm = input("确认清除 Telegram 配置？输入 yes 确认：").strip().lower()
         if confirm != "yes":
             print("已取消清除。")
             return
-        unset_env_value("SWU_PROXY_URL", "SWU_PROXY_USERNAME", "SWU_PROXY_PASSWORD")
-        print("已清除学校官网代理配置。")
-    elif choice == "0":
-        return
-    else:
+        unset_env_value("PUSH_TELEGRAM_BOT_TOKEN", "PUSH_TELEGRAM_CHAT_ID")
+        print("已清除 Telegram 推送配置。")
+    elif choice != "0":
         print("无效选项。")
 
 
@@ -946,7 +919,6 @@ def run_menu():
         print("9. 清除 Token 缓存")
         print("10. 测试推送通道")
         print("11. 立即执行一次打卡")
-        print("12. 配置学校官网代理")
         print("0. 退出")
 
         try:
@@ -983,9 +955,6 @@ def run_menu():
                 pause_menu()
             elif choice == "11":
                 menu_run_checkin_once()
-                pause_menu()
-            elif choice == "12":
-                menu_set_proxy()
                 pause_menu()
             elif choice == "0":
                 print("已退出菜单。")
@@ -1137,11 +1106,6 @@ if __name__ == "__main__":
         missing = GET_INFO_IMPORT_ERROR or REQUESTS_IMPORT_ERROR
         logger.error(f"依赖加载失败：{missing}")
         logger.error("请先安装依赖，或运行 --check-config 查看当前环境状态。")
-        raise SystemExit(1)
-
-    proxy_ok, proxy_err = validate_proxy_config()
-    if not proxy_ok:
-        logger.error(f"学校官网代理配置无效：{proxy_err}")
         raise SystemExit(1)
 
     connectivity_ok, connectivity_msg = check_school_connectivity(timeout=5)

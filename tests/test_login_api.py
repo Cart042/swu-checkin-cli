@@ -40,6 +40,88 @@ class LoginApiOfflineTests(unittest.TestCase):
         self.assertNotIn("SWU_LOGIN_METHOD", source)
         self.assertNotIn("from des import", source)
         self.assertNotIn("_transform_ticket", source)
+        self.assertNotIn("_".join(("SWU", "PROXY")), source)
+        self.assertNotIn('launch_options["proxy"]', source)
+        self.assertNotIn('wait_until="networkidle"', source)
+
+    def test_school_session_ignores_proxy_environment_and_has_no_proxy_map(self):
+        class Session:
+            def __init__(self):
+                self.trust_env = True
+                self.proxies = {"https": "http://must-not-be-used.invalid"}
+
+        session = Session()
+        with mock.patch.object(get_info.requests, "Session", return_value=session), mock.patch.dict(
+            os.environ,
+            {"HTTPS_PROXY": "http://must-not-be-used.invalid", "ALL_PROXY": "http://must-not-be-used.invalid"},
+            clear=False,
+        ):
+            direct = get_info.create_school_session()
+        self.assertIs(direct, session)
+        self.assertFalse(direct.trust_env)
+        self.assertEqual(direct.proxies, {})
+
+    def test_initial_cas_service_query_is_not_a_login_redirect(self):
+        cas_url = (
+            "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
+            "?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Fresolve-cas-return"
+        )
+
+        class Page:
+            url = cas_url
+
+            def evaluate(self, _script):
+                return "{}"
+
+        page = Page()
+        self.assertFalse(get_info._login_success_detected(page, cas_url))
+        page.url = "https://of.swu.edu.cn/gateway/resolve-cas-return?ticket=one-time"
+        self.assertTrue(get_info._login_success_detected(page, cas_url))
+
+    def test_login_result_wait_uses_explicit_arg_keyword(self):
+        class Page:
+            url = "https://of.swu.edu.cn/cas/login"
+
+            def __init__(self):
+                self.calls = []
+
+            def wait_for_function(self, expression, **kwargs):
+                self.calls.append((expression, kwargs))
+                self.url = "https://of.swu.edu.cn/gateway/resolve-cas-return?ticket=one-time"
+
+            def evaluate(self, _script):
+                return "{}"
+
+        page = Page()
+        self.assertTrue(get_info._wait_for_login_result(page, "https://of.swu.edu.cn/cas/login", 5))
+        self.assertEqual(len(page.calls), 1)
+        self.assertIn("arg", page.calls[0][1])
+        self.assertNotIn("networkidle", page.calls[0][0])
+
+    def test_local_storage_prefers_access_token_over_other_token_values(self):
+        payload = {
+            "refresh_token": "refresh-token",
+            "auth": "auth-value",
+            "access_token": "access-token",
+        }
+        self.assertEqual(get_info._token_from_local_storage(payload), "access-token")
+
+    def test_invalid_new_token_is_not_cached(self):
+        with mock.patch.object(
+            get_info,
+            "get_student_id",
+            side_effect=get_info.TokenInvalidError("invalid"),
+        ), mock.patch.object(get_info, "_save_cached_token") as save:
+            with self.assertRaises(get_info.TokenInvalidError):
+                get_info._validate_and_cache_token(
+                    "student",
+                    "candidate-token",
+                    "/tmp/unused-token-cache.json",
+                    5,
+                    object(),
+                    None,
+                )
+        save.assert_not_called()
 
     def test_write_request_is_never_retried(self):
         session = FakeSession([FakeResponse(500), FakeResponse(200)])

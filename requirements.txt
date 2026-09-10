@@ -1,7 +1,6 @@
 # Direct runtime dependencies verified in the offline CI environment (Python 3.12)
 # and compatible with the Python 3.11 workflows/Docker image.
 requests==2.34.2
-PySocks==1.7.1
 playwright==1.62.0
 ddddocr==1.6.1
 python-dotenv==1.2.3

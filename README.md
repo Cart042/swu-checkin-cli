@@ -15,12 +15,12 @@
 
 - 浏览器登录学校统一认证页面，自动识别登录页验证码并获取 Token。
 - 使用 `users.json` 或环境变量管理多个账号。
-- 用 `python check_in.py -m` 打开数字菜单，配置账号、并发、代理和推送。
+- 用 `python check_in.py -m` 打开数字菜单，配置账号、并发和推送。
 - 使用 Docker Compose 在 VPS 上运行一次性任务。
 - 使用 GitHub Actions 在每天北京时间 21:05（UTC 13:05）定时运行，也可以手动运行。
-- 支持钉钉、企业微信、Bark、Server 酱和 PushDeer 推送。
+- 支持钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。
 
-学校官网的网络出口和登录页策略会影响运行结果。海外服务器需要能访问学校官网，或配置可信的中国大陆代理出口。
+学校官网的网络出口和登录页策略会影响运行结果。运行主机需要能够直接访问学校官网和统一认证页面。
 
 ## 快速开始
 
@@ -85,7 +85,6 @@ python check_in.py -m
 - 查看、添加、删除账号和修改密码；
 - 设置最大并发数；
 - 配置和测试推送通道；
-- 配置学校官网代理；
 - 查看配置路径、清除 Token 缓存；
 - 立即运行一次打卡。
 
@@ -97,6 +96,9 @@ python check_in.py -m
 
 - `SWU_USERNAME`
 - `SWU_PASSWORD`
+- 需要使用的推送渠道 Secret：`PUSH_DINGTALK_TOKEN`、`PUSH_DINGTALK_SECRET`、`PUSH_QYWX_KEY`、`PUSH_BARK_KEY`、`PUSH_BARK_URL`、`PUSH_SERVERCHAN_KEY`、`PUSH_PUSHDEER_KEY`
+- `PUSH_TELEGRAM_BOT_TOKEN`（可选）
+- `PUSH_TELEGRAM_CHAT_ID`（可选）
 
 工作流保留每天北京时间 21:05 的定时触发、手动触发和并发保护。手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
 
@@ -124,17 +126,9 @@ SWU_USERNAME=your_username SWU_PASSWORD=your_password \
 
 不要把真实账号、`.env`、Token 缓存、日志、调试目录或运行锁放入镜像。`.dockerignore` 已排除这些运行文件。
 
-## 网络和代理
+## 网络
 
-没有代理时，程序直接访问学校官网。需要代理时，可以在 `.env` 或运行环境中设置：
-
-```dotenv
-SWU_PROXY_URL=http://proxy.example.com:7890
-SWU_PROXY_USERNAME=
-SWU_PROXY_PASSWORD=
-```
-
-也可以使用标准的 `HTTPS_PROXY`、`HTTP_PROXY` 或 `ALL_PROXY`。`SWU_PROXY_URL` 优先级更高。代理支持 `http://`、`https://`、`socks4://` 和 `socks5://`。在菜单中选择“配置学校官网代理”也会写入这些配置。
+学校接口请求和浏览器登录使用直连网络，并显式忽略运行环境中的代理变量。请先确认运行主机能够访问学校官网；`--check-config` 会提供连通性提示，但不会执行登录或签到。
 
 ## 推送
 
@@ -147,8 +141,9 @@ SWU_PROXY_PASSWORD=
 | Bark | `PUSH_BARK_KEY` / `PUSH_BARK_URL` |
 | Server 酱 | `PUSH_SERVERCHAN_KEY` |
 | PushDeer | `PUSH_PUSHDEER_KEY` |
+| Telegram Bot | `PUSH_TELEGRAM_BOT_TOKEN` / `PUSH_TELEGRAM_CHAT_ID` |
 
-未配置推送时，结果仍会写入日志。
+Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改和清除。未配置推送时，结果仍会写入日志。
 
 ## 常用环境变量
 
@@ -163,9 +158,8 @@ SWU_PROXY_PASSWORD=
 | `SWU_RUN_DEADLINE_SECONDS` | 单次任务总时限，默认 `900` 秒 |
 | `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`；可选 `DEBUG`、`WARNING`、`ERROR` |
 | `SWU_DEBUG_DIR` | 登录异常调试目录；仅排查问题时设置，例如 `debug` |
-| `SWU_PROXY_MODE` | 代理模式，默认 `auto`；也可设为 `manual` 或 `off` |
-| `SWU_PROXY_URL` | 学校官网代理地址 |
-| `SWU_PROXY_USERNAME` / `SWU_PROXY_PASSWORD` | 代理认证信息 |
+| `PUSH_TELEGRAM_BOT_TOKEN` | Telegram Bot Token；需与 Chat ID 同时设置 |
+| `PUSH_TELEGRAM_CHAT_ID` | Telegram 接收消息的 Chat ID；需与 Bot Token 同时设置 |
 
 失败账号的重试预算默认是 900 秒，重试轮数默认 3 轮；每次网络和浏览器操作都会按剩余预算设置超时。可通过 `SWU_RUN_DEADLINE_SECONDS` 调整预算（允许范围由程序校验）。
 

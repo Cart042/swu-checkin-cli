@@ -2,6 +2,7 @@ import os
 import stat
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import check_in
@@ -9,6 +10,65 @@ from dotenv import dotenv_values
 
 
 class CheckInOfflineTests(unittest.TestCase):
+    def test_school_session_is_created_by_direct_session_factory(self):
+        session = mock.Mock()
+        with mock.patch.object(check_in, "create_school_session", return_value=session) as factory, \
+             mock.patch.object(check_in, "get_token", return_value="token"), \
+             mock.patch.object(check_in, "vacation_enable", return_value=False), \
+             mock.patch.object(check_in, "get_transition_today", return_value=None):
+            self.assertEqual(check_in.check_in("alice", "password"), 0)
+        factory.assert_called_once_with()
+        session.close.assert_called_once_with()
+
+    def test_check_in_has_no_legacy_school_proxy_surface(self):
+        source = Path(check_in.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("_".join(("SWU", "PROXY")), source)
+        self.assertNotIn("_".join(("apply", "proxy", "to", "session")), source)
+
+    def test_telegram_channel_requires_token_and_chat_id(self):
+        with mock.patch.dict(
+            os.environ,
+            {"PUSH_TELEGRAM_BOT_TOKEN": "bot-token", "PUSH_TELEGRAM_CHAT_ID": "chat-id"},
+            clear=True,
+        ):
+            self.assertIn("Telegram", check_in.configured_push_channels())
+            self.assertEqual(check_in.push_configuration_errors(), [])
+
+        with mock.patch.dict(os.environ, {"PUSH_TELEGRAM_BOT_TOKEN": "bot-token"}, clear=True):
+            self.assertNotIn("Telegram", check_in.configured_push_channels())
+            self.assertEqual(
+                check_in.push_configuration_errors(),
+                ["Telegram 推送缺少 PUSH_TELEGRAM_CHAT_ID。"],
+            )
+
+    def test_telegram_menu_sets_and_clears_both_values(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            check_in, "CONFIG_DIR", directory
+        ), mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            check_in, "prompt_password", return_value="bot-token"
+        ), mock.patch("builtins.input", side_effect=["1", "chat-id"]):
+            check_in.menu_set_telegram()
+            self.assertEqual(os.environ["PUSH_TELEGRAM_BOT_TOKEN"], "bot-token")
+            self.assertEqual(os.environ["PUSH_TELEGRAM_CHAT_ID"], "chat-id")
+            values = dotenv_values(os.path.join(directory, ".env"), interpolate=False)
+            self.assertEqual(values["PUSH_TELEGRAM_BOT_TOKEN"], "bot-token")
+            self.assertEqual(values["PUSH_TELEGRAM_CHAT_ID"], "chat-id")
+
+            with mock.patch("builtins.input", side_effect=["2", "yes"]):
+                check_in.menu_set_telegram()
+            self.assertNotIn("PUSH_TELEGRAM_BOT_TOKEN", os.environ)
+            self.assertNotIn("PUSH_TELEGRAM_CHAT_ID", os.environ)
+            values = dotenv_values(os.path.join(directory, ".env"), interpolate=False)
+            self.assertNotIn("PUSH_TELEGRAM_BOT_TOKEN", values)
+            self.assertNotIn("PUSH_TELEGRAM_CHAT_ID", values)
+
+    def test_dependency_check_uses_metadata_without_importing_module(self):
+        sentinel = object()
+        with mock.patch.object(check_in.importlib.util, "find_spec", return_value=sentinel) as find_spec, \
+             mock.patch("builtins.__import__", side_effect=AssertionError("unexpected import")):
+            self.assertEqual(check_in.check_dependency("ddddocr"), (True, None))
+        find_spec.assert_called_once_with("ddddocr")
+
     def test_validate_accounts_deduplicates_and_preserves_password_spaces(self):
         accounts = check_in.validate_accounts([
             {"username": "  alice ", "password": "  keep spaces  "},
@@ -181,13 +241,13 @@ class CheckInOfflineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             check_in, "CONFIG_DIR", directory
         ), mock.patch.dict(os.environ, {}, clear=False):
-            check_in.set_env_value("SWU_PROXY_PASSWORD", value)
+            check_in.set_env_value("TEST_SECRET", value)
             env_path = os.path.join(directory, ".env")
-            self.assertEqual(dotenv_values(env_path, interpolate=False)["SWU_PROXY_PASSWORD"], value)
-            self.assertEqual(os.environ["SWU_PROXY_PASSWORD"], value)
+            self.assertEqual(dotenv_values(env_path, interpolate=False)["TEST_SECRET"], value)
+            self.assertEqual(os.environ["TEST_SECRET"], value)
 
-            check_in.unset_env_value("SWU_PROXY_PASSWORD")
-            self.assertNotIn("SWU_PROXY_PASSWORD", dotenv_values(env_path, interpolate=False))
+            check_in.unset_env_value("TEST_SECRET")
+            self.assertNotIn("TEST_SECRET", dotenv_values(env_path, interpolate=False))
 
     def test_os_lock_does_not_delete_or_age_out_active_lock(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(check_in, "CONFIG_DIR", directory):
