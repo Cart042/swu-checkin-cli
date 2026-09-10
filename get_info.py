@@ -7,8 +7,10 @@ import threading
 import logging
 import sys
 import os
+import hashlib
+import tempfile
+import time
 from playwright.sync_api import sync_playwright
-from des import des
 
 class SafeStreamHandler(logging.StreamHandler):
     def emit(self, record):
@@ -30,6 +32,29 @@ class SafeStreamHandler(logging.StreamHandler):
 logger = logging.getLogger("swu")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
+
+
+class DeadlineExceeded(TimeoutError):
+    """The operation could not finish before its monotonic deadline."""
+
+
+class SwuRequestError(requests.exceptions.RequestException):
+    """An HTTP response from a school endpoint was not successful."""
+
+    def __init__(self, message, *, status_code=None, response=None, method=None, url=None):
+        super().__init__(message, response=response)
+        self.status_code = status_code
+        self.response = response
+        self.method = method
+        self.url = url
+
+
+class TokenInvalidError(SwuRequestError):
+    """The school API rejected the current access token."""
+
+
+class SwuBusinessError(RuntimeError):
+    """The school API returned a successful HTTP response with bad business data."""
 
 
 class LoginError(Exception):
@@ -176,107 +201,218 @@ def playwright_proxy_options():
 
 
 def check_school_connectivity(timeout=5):
+    """Probe the school site for diagnostics only.
+
+    A response with any HTTP status still proves that the network path is
+    reachable.  This helper must never perform login, refresh a token, or
+    change cached state.
+    """
     session = apply_proxy_to_session(requests.Session())
     try:
         response = session.get("https://of.swu.edu.cn/", timeout=timeout)
         return True, f"HTTP {response.status_code}"
     except requests.exceptions.ProxyError as exc:
-        return False, f"代理连接失败：{exc}"
+        return False, f"代理连接失败：{_redact_text(exc)}"
     except requests.exceptions.SSLError as exc:
-        return False, f"TLS/证书连接失败：{exc}"
+        return False, f"TLS/证书连接失败：{_redact_text(exc)}"
     except requests.exceptions.Timeout as exc:
-        return False, f"连接学校官网超时：{exc}"
+        return False, f"连接学校官网超时：{_redact_text(exc)}"
     except requests.exceptions.ConnectionError as exc:
-        return False, f"无法连接学校官网：{exc}"
+        return False, f"无法连接学校官网：{_redact_text(exc)}"
     except requests.exceptions.RequestException as exc:
-        return False, f"请求学校官网失败：{exc}"
+        return False, f"请求学校官网失败：{_redact_text(exc)}"
+    finally:
+        close = getattr(session, "close", None)
+        if close:
+            close()
 
 
 def has_school_proxy_config():
     return get_proxy_config() is not None
 
 
+_SENSITIVE_QUERY_KEYS = {
+    "password",
+    "passwd",
+    "pwd",
+    "token",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "idtoken1",
+    "idtoken2",
+    "idtoken3",
+    "ticket",
+    "code",
+    "state",
+    "authorization",
+}
+_SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)(\b(?:password|passwd|pwd|token|access_token|refresh_token|id_token|idtoken[123]|ticket|code|state|authorization)\b\s*[=:]\s*)([^\s&<>'\";,}]+)"
+)
+_BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+")
+
+
+def _redact_url(url):
+    """Remove credentials and one-time values from a URL used in diagnostics."""
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+        query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        safe_query = [
+            (key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else value)
+            for key, value in query_pairs
+        ]
+        fragment_pairs = urllib.parse.parse_qsl(parsed.fragment, keep_blank_values=True)
+        safe_fragment = (
+            urllib.parse.urlencode(
+                [
+                    (key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else value)
+                    for key, value in fragment_pairs
+                ]
+            )
+            if fragment_pairs
+            else parsed.fragment
+        )
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(safe_query), safe_fragment)
+        )
+    except Exception:
+        return _redact_text(str(url))
+
+
+def _redact_text(value, secrets=()):
+    """Return diagnostic text with credentials and bearer/query secrets removed."""
+    if value is None:
+        return ""
+    text = str(value)
+    candidates = sorted(
+        {str(secret) for secret in secrets if secret is not None and str(secret)},
+        key=len,
+        reverse=True,
+    )
+    for secret in candidates:
+        # Very short values cause broad accidental replacements (for example
+        # a one-character captcha); query/field redaction below still catches
+        # those fields by name.
+        if len(secret) >= 2:
+            text = text.replace(secret, "[REDACTED]")
+    text = _SENSITIVE_VALUE_RE.sub(r"\1[REDACTED]", text)
+    text = _BEARER_RE.sub(r"\1[REDACTED]", text)
+    return text
+
+
+def _debug_user_id(username):
+    digest = hashlib.sha256(str(username).encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"user-{digest}"
+
+
 def save_login_debug_artifacts(page, username, reason, error=None):
+    """Write a small, redacted diagnostic record.
+
+    Login pages contain credentials in form controls and sometimes include
+    one-time tickets in their URL.  We intentionally do not persist page HTML
+    or screenshots.  The text record contains only URL metadata, selector
+    presence, and redacted error information.
+    """
     debug_dir = os.getenv("SWU_DEBUG_DIR", "").strip()
     if not debug_dir:
         return
+    safe_user = _debug_user_id(username)
+    safe_reason = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(reason))[:40] or "debug"
+    prefix = os.path.join(debug_dir, f"login_{safe_user}_{safe_reason}_{int(time.time() * 1000)}")
     try:
-        os.makedirs(debug_dir, exist_ok=True)
-        safe_user = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(username))[:32] or "user"
-        safe_reason = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(reason))[:40] or "debug"
-        prefix = os.path.join(debug_dir, f"login_{safe_user}_{safe_reason}_{int(__import__('time').time() * 1000)}")
+        os.makedirs(debug_dir, mode=0o700, exist_ok=True)
         try:
-            title = page.title()
+            os.chmod(debug_dir, 0o700)
+        except OSError:
+            pass
+        page_url = _redact_url(getattr(page, "url", ""))
+        try:
+            title = _redact_text(page.title(), [username])
         except Exception:
             title = ""
+        selectors = (
+            "input#loginName, input[name=IDToken1]",
+            "input#password, input[name=IDToken2]",
+            "input#validateCode, input[name=IDToken3]",
+            "button:has-text(登录), input[type=submit]",
+        )
+        selector_state = {}
+        for selector in selectors:
+            try:
+                selector_state[selector] = bool(page.locator(selector).count())
+            except Exception:
+                selector_state[selector] = None
+        lines = [
+            f"reason: {_redact_text(reason, [username])}",
+            f"url: {page_url}",
+            f"title: {title}",
+            f"error_type: {type(error).__name__ if error is not None else ''}",
+            f"error: {_redact_text(error, [username])[:1000] if error is not None else ''}",
+            "selectors: " + json.dumps(selector_state, ensure_ascii=False, sort_keys=True),
+        ]
+        with open(f"{prefix}.txt", "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         try:
-            body_text = page.locator("body").inner_text(timeout=1000)
-        except Exception:
-            body_text = ""
-        body_preview = re.sub(r"\s+", " ", body_text).strip()[:1000]
-        page.screenshot(path=f"{prefix}.png", full_page=True)
-        with open(f"{prefix}.html", "w", encoding="utf-8") as f:
-            f.write(f"<!-- reason: {reason} -->\n")
-            f.write(f"<!-- url: {page.url} -->\n")
-            if title:
-                f.write(f"<!-- title: {title} -->\n")
-            if error is not None:
-                f.write(f"<!-- error_type: {type(error).__name__} -->\n")
-                f.write(f"<!-- error: {str(error).replace('--', '- -')[:1000]} -->\n")
-            f.write(page.content())
-        with open(f"{prefix}.txt", "w", encoding="utf-8") as f:
-            f.write(f"reason: {reason}\n")
-            f.write(f"url: {page.url}\n")
-            f.write(f"title: {title}\n")
-            if error is not None:
-                f.write(f"error_type: {type(error).__name__}\n")
-                f.write(f"error: {error}\n")
-            f.write(f"body_preview: {body_preview}\n")
-        logger.info(f"账号 {username}: 已保存登录调试快照：{prefix}.png / {prefix}.html / {prefix}.txt")
+            os.chmod(f"{prefix}.txt", 0o600)
+        except OSError:
+            pass
+        logger.info("账号 %s: 已保存登录诊断：%s.txt", safe_user, prefix)
     except Exception as exc:
-        logger.warning(f"账号 {username}: 保存登录调试快照失败：{exc}")
+        logger.warning("账号 %s: 保存登录诊断失败：%s", safe_user, _redact_text(exc, [username]))
 
 
-def recover_from_idm_error_page(page, username, timeout, recovery_url=None):
+def recover_from_idm_error_page(page, username, timeout, recovery_url=None, deadline=None):
+    _remaining_seconds(deadline)
     try:
-        body_text = page.locator("body").inner_text(timeout=2000)
+        body_text = page.locator("body").inner_text(timeout=min(2000, _browser_timeout_ms(timeout, deadline)))
     except Exception:
         body_text = ""
     if "动态口令验证失败" not in body_text and "验证失败" not in body_text:
         return False
 
-    logger.warning(f"账号 {username}: 统一认证页面提示验证失败，尝试重新打开登录入口。")
+    logger.warning("账号 %s: 统一认证页面提示验证失败，尝试重新打开登录入口。", _debug_user_id(username))
     try:
+        _remaining_seconds(deadline)
         if recovery_url:
-            page.goto(recovery_url, wait_until="domcontentloaded", timeout=timeout * 1000)
-            page.wait_for_timeout(2000)
+            page.goto(recovery_url, wait_until="domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
+            page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
         else:
             link = page.locator('a:has-text("返回至登录页面")').first
-            href = link.get_attribute("href", timeout=3000)
+            href = link.get_attribute("href", timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
             if href:
-                logger.debug(f"账号 {username}: 返回登录页面链接：{href[:200]}")
-                page.goto(urllib.parse.urljoin(page.url, href), wait_until="domcontentloaded", timeout=timeout * 1000)
+                logger.debug("账号 %s: 返回登录页面链接：%s", _debug_user_id(username), _redact_url(href)[:200])
+                page.goto(
+                    urllib.parse.urljoin(page.url, href),
+                    wait_until="domcontentloaded",
+                    timeout=_browser_timeout_ms(timeout, deadline),
+                )
             else:
-                link.click(timeout=timeout * 1000)
-                page.wait_for_load_state("domcontentloaded", timeout=timeout * 1000)
-            page.wait_for_timeout(2000)
-        logger.debug(f"账号 {username}: 返回登录页面后 URL: {page.url}")
+                link.click(timeout=_browser_timeout_ms(timeout, deadline))
+                page.wait_for_load_state("domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
+            page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
+        logger.debug("账号 %s: 返回登录页面后 URL: %s", _debug_user_id(username), _redact_url(page.url))
         return True
     except Exception as exc:
         save_login_debug_artifacts(page, username, "idm_error_recovery_failed", exc)
         raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
 
 
-def click_username_password_tab(page, username, timeout):
+def click_username_password_tab(page, username, timeout, deadline=None):
+    _remaining_seconds(deadline)
     tab = page.locator('text="用户名密码"').first
     try:
         if tab.count() > 0:
-            logger.debug(f"账号 {username}: 正在切换到用户名密码登录。")
-            tab.click(timeout=timeout * 1000)
-            page.wait_for_timeout(500)
+            logger.debug("账号 %s: 正在切换到用户名密码登录。", _debug_user_id(username))
+            tab.click(timeout=_browser_timeout_ms(timeout, deadline))
+            page.wait_for_timeout(min(500, _browser_timeout_ms(timeout, deadline)))
             return True
     except Exception as exc:
-        logger.debug(f"账号 {username}: 切换用户名密码登录失败：{exc}")
+        logger.debug("账号 %s: 切换用户名密码登录失败：%s", _debug_user_id(username), _redact_text(exc))
     return False
 
 
@@ -292,23 +428,27 @@ def captcha_locator(page):
     return page.locator('img#kaptchaImage, img[src*="kaptcha"], img[src*="captcha"]').first
 
 
-def get_captcha_image_bytes(page, captcha_el, timeout):
-    captcha_el.wait_for(state="visible", timeout=timeout * 1000)
-    page.wait_for_timeout(500)
+def get_captcha_image_bytes(page, captcha_el, timeout, deadline=None):
+    _remaining_seconds(deadline)
+    captcha_el.wait_for(state="visible", timeout=_browser_timeout_ms(timeout, deadline))
+    page.wait_for_timeout(min(500, _browser_timeout_ms(timeout, deadline)))
     try:
-        handle = captcha_el.element_handle(timeout=timeout * 1000)
+        handle = captcha_el.element_handle(timeout=_browser_timeout_ms(timeout, deadline))
         if handle:
             src = handle.get_attribute("src") or ""
             if src.startswith("data:image"):
                 encoded = src.split(",", 1)[1]
                 return base64.b64decode(encoded)
             if src:
-                response = page.request.get(urllib.parse.urljoin(page.url, src), timeout=timeout * 1000)
+                response = page.request.get(
+                    urllib.parse.urljoin(page.url, src),
+                    timeout=_browser_timeout_ms(timeout, deadline),
+                )
                 if response.ok:
                     return response.body()
     except Exception as exc:
-        logger.debug(f"验证码图片请求获取失败，回退元素截图：{exc}")
-    return captcha_el.screenshot(timeout=timeout * 1000)
+        logger.debug("验证码图片请求获取失败，回退元素截图：%s", _redact_text(exc))
+    return captcha_el.screenshot(timeout=_browser_timeout_ms(timeout, deadline))
 
 
 def captcha_input_locator(page):
@@ -319,15 +459,21 @@ def submit_button_locator(page):
     return page.locator('input#button, button:has-text("登录"), input[type="submit"], .loginBtn, .btn-login').first
 
 
-def ensure_login_form(page, username, timeout, recovery_url=None):
+def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None):
     for attempt in range(1, 4):
-        logger.debug(f"账号 {username}: 正在确认登录表单 (第 {attempt}/3 次)，当前 URL: {page.url}")
-        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url)
-        click_username_password_tab(page, username, timeout)
+        _remaining_seconds(deadline)
+        logger.debug(
+            "账号 %s: 正在确认登录表单 (第 %s/3 次)，当前 URL: %s",
+            _debug_user_id(username),
+            attempt,
+            _redact_url(page.url),
+        )
+        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url, deadline=deadline)
+        click_username_password_tab(page, username, timeout, deadline=deadline)
         try:
-            login_name_locator(page).wait_for(timeout=3000)
-            password_locator(page).wait_for(timeout=3000)
-            logger.debug(f"账号 {username}: 已找到登录表单。")
+            login_name_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
+            password_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
+            logger.debug("账号 %s: 已找到登录表单。", _debug_user_id(username))
             return
         except Exception:
             pass
@@ -335,19 +481,24 @@ def ensure_login_form(page, username, timeout, recovery_url=None):
         button = page.locator('img[src*="unified_button"]').first
         try:
             if button.count() > 0:
-                logger.debug(f"账号 {username}: 正在点击统一认证登录按钮...")
-                button.click(timeout=timeout * 1000)
-                page.wait_for_timeout(1000)
+                logger.debug("账号 %s: 正在点击统一认证登录按钮...", _debug_user_id(username))
+                button.click(timeout=_browser_timeout_ms(timeout, deadline))
+                page.wait_for_timeout(min(1000, _browser_timeout_ms(timeout, deadline)))
                 continue
         except Exception as exc:
-            logger.debug(f"账号 {username}: 点击统一认证登录按钮失败 (第 {attempt}/3 次): {exc}")
+            logger.debug(
+                "账号 %s: 点击统一认证登录按钮失败 (第 %s/3 次): %s",
+                _debug_user_id(username),
+                attempt,
+                _redact_text(exc),
+            )
 
-        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url)
-        click_username_password_tab(page, username, timeout)
+        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url, deadline=deadline)
+        click_username_password_tab(page, username, timeout, deadline=deadline)
         try:
-            login_name_locator(page).wait_for(timeout=3000)
-            password_locator(page).wait_for(timeout=3000)
-            logger.debug(f"账号 {username}: 已找到登录表单。")
+            login_name_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
+            password_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
+            logger.debug("账号 %s: 已找到登录表单。", _debug_user_id(username))
             return
         except Exception:
             pass
@@ -362,143 +513,226 @@ def get_ocr():
         _thread_local.ocr = ddddocr.DdddOcr(show_ad=False)
     return _thread_local.ocr
 
-def request_with_retry(method, url, max_retries=3, backoff_factor=2, session=None, **kwargs):
-    import time
+_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
+_RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _remaining_seconds(deadline):
+    if deadline is None:
+        return None
+    remaining = float(deadline) - time.monotonic()
+    if remaining <= 0:
+        raise DeadlineExceeded("操作已超过截止时间")
+    return remaining
+
+
+def _timeout_with_deadline(timeout, deadline):
+    remaining = _remaining_seconds(deadline)
+    if remaining is None:
+        return timeout
+    if timeout is None:
+        return remaining
+    if isinstance(timeout, (tuple, list)):
+        return tuple(
+            min(float(value), remaining) if value is not None else remaining
+            for value in timeout
+        )
+    try:
+        return min(float(timeout), remaining)
+    except (TypeError, ValueError):
+        return remaining
+
+
+def _browser_timeout_ms(timeout, deadline):
+    """Convert the per-operation timeout to milliseconds without crossing deadline."""
+    bounded = _timeout_with_deadline(timeout, deadline)
+    if bounded is None:
+        bounded = timeout
+    try:
+        return max(1, int(float(bounded) * 1000))
+    except (TypeError, ValueError):
+        return 1000
+
+
+def _http_status_error(method, url, status_code, response):
+    safe_url = _redact_url(url)
+    message = f"{method.upper()} {safe_url} 返回 HTTP {status_code}"
+    error_type = TokenInvalidError if status_code in {401, 403} else SwuRequestError
+    return error_type(
+        message,
+        status_code=status_code,
+        response=response,
+        method=method.upper(),
+        url=safe_url,
+    )
+
+
+def _sleep_before_retry(attempt, backoff_factor, deadline):
+    delay = max(0.0, float(backoff_factor)) ** attempt
+    remaining = _remaining_seconds(deadline)
+    if remaining is not None:
+        if remaining <= 0:
+            raise DeadlineExceeded("重试前已超过截止时间")
+        delay = min(delay, remaining)
+    if delay:
+        time.sleep(delay)
+
+
+def request_with_retry(
+    method,
+    url,
+    max_retries=3,
+    backoff_factor=2,
+    session=None,
+    retryable=None,
+    deadline=None,
+    **kwargs,
+):
+    """Issue a school request with bounded retries and HTTP validation.
+
+    Only explicitly retryable calls may repeat.  In particular, write calls
+    default to one attempt so a timeout cannot duplicate a check-in.
+    """
+    method_upper = str(method).upper()
+    if retryable is None:
+        retryable = method_upper in _IDEMPOTENT_METHODS
+    attempts = max(1, int(max_retries or 1)) if retryable else 1
+    own_client = session is None
     client = session or apply_proxy_to_session(requests.Session())
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = client.request(method, url, **kwargs)
-            if response.status_code in [500, 502, 503, 504]:
-                response.raise_for_status()
-            return response
-        except (requests.exceptions.RequestException, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            if attempt == max_retries:
-                logger.error(f"请求失败，已达最大重试次数 {max_retries}: {e}")
+
+    try:
+        for attempt in range(1, attempts + 1):
+            call_kwargs = dict(kwargs)
+            if deadline is not None:
+                call_kwargs["timeout"] = _timeout_with_deadline(call_kwargs.get("timeout"), deadline)
+            try:
+                response = client.request(method, url, **call_kwargs)
+                _remaining_seconds(deadline)
+                status = getattr(response, "status_code", None)
+                if status is not None:
+                    try:
+                        status = int(status)
+                    except (TypeError, ValueError):
+                        raise SwuRequestError(
+                            f"{method_upper} {_redact_url(url)} 返回无效 HTTP 状态码",
+                            method=method_upper,
+                            url=_redact_url(url),
+                            response=response,
+                        )
+                    if not 200 <= status < 300:
+                        error = _http_status_error(method_upper, url, status, response)
+                        if retryable and status in _RETRYABLE_HTTP_STATUS and attempt < attempts:
+                            logger.warning(
+                                "请求 HTTP %s，将在重试后再次请求（第 %s/%s 次）：%s",
+                                status,
+                                attempt + 1,
+                                attempts,
+                                _redact_url(url),
+                            )
+                            _sleep_before_retry(attempt, backoff_factor, deadline)
+                            continue
+                        raise error
+                return response
+            except DeadlineExceeded:
                 raise
-            sleep_time = backoff_factor ** attempt
-            logger.warning(f"请求异常: {e}。将在 {sleep_time} 秒后进行第 {attempt + 1}/{max_retries} 次重试...")
-            time.sleep(sleep_time)
+            except requests.exceptions.RequestException as exc:
+                if deadline is not None and time.monotonic() >= float(deadline):
+                    raise DeadlineExceeded("请求已超过截止时间") from exc
+                can_retry_exception = isinstance(
+                    exc,
+                    (requests.exceptions.Timeout, requests.exceptions.ConnectionError),
+                )
+                if not retryable or not can_retry_exception or attempt >= attempts:
+                    logger.error("请求失败：%s", _redact_text(exc))
+                    raise
+                logger.warning(
+                    "请求异常，将在重试后再次请求（第 %s/%s 次）：%s",
+                    attempt + 1,
+                    attempts,
+                    _redact_text(exc),
+                )
+                _sleep_before_retry(attempt, backoff_factor, deadline)
+    finally:
+        if own_client:
+            close = getattr(client, "close", None)
+            if close:
+                close()
 
 def _load_cached_token(username, cache_path):
-    import os
     with _token_cache_lock:
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    cache = json.load(f)
-                return cache.get(username)
-            except Exception:
-                pass
-    return None
+        try:
+            with open(cache_path, "r", encoding="utf-8") as handle:
+                cache = json.load(handle)
+            if not isinstance(cache, dict):
+                return None
+            token = cache.get(username)
+            return token if isinstance(token, str) and token else None
+        except (OSError, ValueError, TypeError):
+            return None
+
 
 def _save_cached_token(username, token, cache_path):
-    import os
+    """Merge and atomically replace the token cache with restrictive modes."""
+    if not isinstance(token, str) or not token:
+        raise ValueError("不能缓存空 Token")
     with _token_cache_lock:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        absolute_path = os.path.abspath(cache_path)
+        directory = os.path.dirname(absolute_path) or "."
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
         cache = {}
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    cache = json.load(f)
-            except Exception:
-                pass
-        cache[username] = token
         try:
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-        except Exception:
+            with open(absolute_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                cache = loaded
+        except (OSError, ValueError, TypeError):
             pass
+        cache[str(username)] = token
 
-def extract_login_params(response):
-    parsed_url = urllib.parse.urlparse(response.url)
-    query_params = urllib.parse.parse_qs(parsed_url.query)
-    goto = query_params.get("goto", [""])[0]
-    realm = query_params.get("realm", ["/"])[0]
-    service = query_params.get("service", ["initService"])[0]
-    
-    state = None
-    
-    # 1. Try to find state in response.url
-    url_unquoted = urllib.parse.unquote(urllib.parse.unquote(response.url))
-    state_match = re.search(r'state=([a-f0-9]{32})', url_unquoted)
-    if state_match:
-        state = state_match.group(1)
-        
-    # 2. Try to find state inside decoded goto parameter
-    if not state and goto:
+        fd, temporary_path = tempfile.mkstemp(prefix=".token-cache-", dir=directory, text=True)
         try:
-            padding_needed = len(goto) % 4
-            goto_padded = goto + "=" * (4 - padding_needed) if padding_needed else goto
-            decoded_goto = base64.b64decode(goto_padded).decode('utf-8', errors='ignore')
-            decoded_unquoted = urllib.parse.unquote(urllib.parse.unquote(decoded_goto))
-            state_match = re.search(r'state=([a-f0-9]{32})', decoded_unquoted)
-            if state_match:
-                state = state_match.group(1)
-        except Exception:
-            pass
-            
-    # 3. Fallback: search history
-    if not state:
-        for hist in response.history:
-            hist_unquoted = urllib.parse.unquote(urllib.parse.unquote(hist.url))
-            state_match = re.search(r'state=([a-f0-9]{32})', hist_unquoted)
-            if state_match:
-                state = state_match.group(1)
-                break
-                
-    # 4. If still not found, search inside history's decoded goto
-    if not state:
-        for hist in response.history:
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                try:
+                    fchmod(fd, 0o600)
+                except (AttributeError, NotImplementedError, OSError):
+                    os.chmod(temporary_path, 0o600)
+            else:
+                os.chmod(temporary_path, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(cache, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                if hasattr(os, "fsync"):
+                    os.fsync(handle.fileno())
+            os.replace(temporary_path, absolute_path)
             try:
-                parsed_hist = urllib.parse.urlparse(hist.url)
-                hist_params = urllib.parse.parse_qs(parsed_hist.query)
-                hist_goto = hist_params.get("goto", [""])[0]
-                if hist_goto:
-                    padding_needed = len(hist_goto) % 4
-                    goto_padded = hist_goto + "=" * (4 - padding_needed) if padding_needed else hist_goto
-                    decoded_goto = base64.b64decode(goto_padded).decode('utf-8', errors='ignore')
-                    decoded_unquoted = urllib.parse.unquote(urllib.parse.unquote(decoded_goto))
-                    state_match = re.search(r'state=([a-f0-9]{32})', decoded_unquoted)
-                    if state_match:
-                        state = state_match.group(1)
-                        break
-            except Exception:
+                os.chmod(absolute_path, 0o600)
+            except OSError:
                 pass
-                
-    return goto, realm, service, state
-
-
-def _transform_ticket(ticket):
-    ticket_parts = urllib.parse.unquote(ticket).split("-")
-    if len(ticket_parts) < 3:
-        raise LoginError("direct_login", "统一认证返回的 ticket 格式异常")
-
-    str1 = ""
-    str2 = ""
-    for char in ticket_parts[1]:
-        str1 += str((int(char) + 5) % 10)
-    for char in ticket_parts[2]:
-        if "0" <= char <= "9":
-            str2 += str((int(char) + 5) % 10)
-        elif "A" <= char <= "Z":
-            str2 += chr(ord(char) + 10 - 26 if ord(char) + 10 > ord("Z") else ord(char) + 10)
-        else:
-            str2 += chr(ord(char) + 15 - 26 if ord(char) + 15 > ord("z") else ord(char) + 15)
-    return str1, str2
-
-
-def _find_query_value_from_response(response, key):
-    candidates = [response]
-    candidates.extend(getattr(response, "history", []) or [])
-    for item in candidates:
-        parsed = urllib.parse.urlparse(item.url)
-        values = urllib.parse.parse_qs(parsed.query).get(key)
-        if values:
-            return values[0]
-        if f"{key}=" in item.url:
-            return item.url.split(f"{key}=", 1)[1].split("&", 1)[0]
-    return None
-
+            try:
+                directory_fd = os.open(directory, os.O_DIRECTORY)
+            except (AttributeError, OSError):
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
 
 def _find_query_value_from_url(url, key):
     parsed = urllib.parse.urlparse(url)
@@ -515,166 +749,109 @@ def _find_query_value_from_url(url, key):
     return None
 
 
-def exchange_token_from_browser_page(page, ticket, timeout):
+def exchange_token_from_browser_page(page, ticket, timeout, deadline=None):
     if not ticket:
         return None
-    result = page.evaluate(
-        """async ({ ticket }) => {
+    _remaining_seconds(deadline)
+    timeout_ms = _browser_timeout_ms(timeout, deadline)
+    try:
+        result = page.evaluate(
+            """async ({ ticket, timeoutMs }) => {
             const url = `/gateway/fighter-middle/api/integrate/uaap/cas/exchange-token?token=${encodeURIComponent(ticket)}&remember=true`;
-            const response = await fetch(url, { credentials: 'include' });
-            const text = await response.text();
-            let data = null;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
             try {
-                data = JSON.parse(text);
-            } catch (error) {
-                data = null;
+                const response = await fetch(url, { credentials: 'include', signal: controller.signal });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = JSON.parse(text);
+                } catch (error) {
+                    data = null;
+                }
+                return { ok: response.ok, status: response.status, data, text: text.slice(0, 500) };
+            } finally {
+                clearTimeout(timer);
             }
-            return { ok: response.ok, status: response.status, data, text: text.slice(0, 500) };
-        }""",
-        {"ticket": ticket},
-    )
-    if not result.get("ok"):
-        logger.debug(f"浏览器 exchange-token 请求未成功：HTTP {result.get('status')} {result.get('text')}")
+            }""",
+            {"ticket": ticket, "timeoutMs": timeout_ms},
+        )
+    except Exception as exc:
+        _remaining_seconds(deadline)
+        logger.debug("浏览器 exchange-token 请求异常：%s", _redact_text(exc))
         return None
-    data = result.get("data") or {}
-    token = data.get("data") or data.get("token") or data.get("access_token")
-    if token:
+    _remaining_seconds(deadline)
+    if not result.get("ok"):
+        logger.debug(
+            "浏览器 exchange-token 请求未成功：HTTP %s %s",
+            result.get("status"),
+            _redact_text(result.get("text")),
+        )
+        return None
+    if not isinstance(result, dict):
+        logger.debug("浏览器 exchange-token 返回结构异常")
+        return None
+    data = result.get("data")
+    if isinstance(data, str) and data:
+        return data
+    if isinstance(data, dict):
+        token = data.get("data") or data.get("token") or data.get("access_token")
+        if isinstance(token, str) and token:
+            return token
+    token = result.get("token") or result.get("access_token")
+    if isinstance(token, str) and token:
         return token
-    logger.debug(f"浏览器 exchange-token 未返回 Token：{result}")
+    logger.debug(
+        "浏览器 exchange-token 未返回 Token：HTTP %s %s",
+        result.get("status"),
+        _redact_text(result.get("text")),
+    )
     return None
 
 
-def _login_response_hint(response):
-    parsed = urllib.parse.urlparse(response.url)
-    location = f"{parsed.netloc}{parsed.path}"
-    history_count = len(getattr(response, "history", []) or [])
-    text = getattr(response, "text", "") or ""
-    error_hints = []
-    for pattern in [
-        r"(用户名或密码[^<\n\r]+)",
-        r"(账号或密码[^<\n\r]+)",
-        r"(密码错误[^<\n\r]*)",
-        r"(验证码[^<\n\r]+)",
-        r"(认证失败[^<\n\r]*)",
-        r"(登录失败[^<\n\r]*)",
-    ]:
-        match = re.search(pattern, text)
-        if match:
-            error_hints.append(match.group(1).strip())
-    suffix = f"，页面提示：{'; '.join(error_hints[:2])}" if error_hints else ""
-    return f"HTTP {response.status_code}，最终地址 {location}，重定向 {history_count} 次{suffix}"
-
-
-def get_token_direct(username: str, password: str, timeout=15, session=None):
-    session = apply_proxy_to_session(session or requests.Session())
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    })
-    encrypted_username, encrypted_password = des(username, password)
-    data = {
-        "IDToken1": encrypted_username,
-        "IDToken2": encrypted_password,
-        "IDToken3": "",
-        "goto": "aHR0cDovL2lkbS5zd3UuZWR1LmNuL2FtL29hdXRoMi9hdXRob3JpemU/c2VydmljZT1pbml0U2VydmljZSZyZXNwb25zZV90eXBlPWNvZGUmY2xpZW50X2lkPTdjMXpva29samw5YmJpaG82eXVvJnNjb3BlPXVpZCtjbit1c2VySWRDb2RlJnJlZGlyZWN0X3VyaT1odHRwcyUzQSUyRiUyRnVhYWFwLnN3dS5lZHUuY24lMkZjYXMlMkZsb2dpbiUzRnNlcnZpY2UlM0RodHRwcyUyNTNBJTI1MkYlMjUyRnVhYWFwLnN3dS5lZHUuY24lMjUyRmNhcyUyNTJGb2F1dGgyLjAlMjUyRmNhbGxiYWNrQXV0aG9yaXplJTI2b3JpZ2luYWxSZXF1ZXN0VXJsJTNEaHR0cHMlMjUzQSUyNTJGJTI1MkZ1YWFhcC5zd3UuZWR1LmNuJTI1MkZjYXMlMjUyRm9hdXRoMi4wJTI1MkZhdXRob3JpemUlMjUzRnJlc3BvbnNlX3R5cGUlMjUzRGNvZGUlMjUyNmNsaWVudF9pZCUyNTNEY2FzNiUyNTI2cmVkaXJlY3RfdXJpJTI1M0RodHRwcyUyNTI1M0ElMjUyNTJGJTI1MjUyRm9mLnN3dS5lZHUuY24lMjUyNTNBNDQzJTI1MjUyRmNhcyUyNTI1MkZvYXV0aCUyNTI1MkZjYWxsYmFjayUyNTI1MkZTV1VfQ0FTMl9GRURFUkFMJTI1MjZzdGF0ZSUyNTNEZTFlMTczODhlNzU4MjY3YjFiNzI2ZjM4Mjg0NDM5MWElMjUyNnNjb3BlJTI1M0RzaW1wbGUlMjZmZWRlcmFsRW5hYmxlJTNEdHJ1ZSZkZWNpc2lvbj1BbGxvdw==",
-        "gotoOnFail": "",
-        "sunQueryParamsString": "cmVhbG09LyZzZXJ2aWNlPWluaXRTZXJ2aWNlJg==",
-        "encoded": "true",
-        "gx_charset": "UTF-8",
-    }
-    cas_url = (
-        "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
-        "?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Ffighter-middle"
-        "%2Fapi%2Fintegrate%2Fuaap%2Fcas%2Fresolve-cas-return"
-        "%3Fnext%3Dhttps%253A%252F%252Fof.swu.edu.cn"
-        "%252F%2523%252FcasLogin%253Ffrom%253D%25252FappCenter"
-    )
-
-    try:
-        response = request_with_retry("GET", cas_url, timeout=timeout, session=session)
-        state_match = re.search(
-            r"state=([a-f0-9]{32})",
-            urllib.parse.unquote(urllib.parse.unquote(response.url)),
-        )
-        if not state_match:
-            raise LoginError("direct_login", "CAS 跳转地址中没有找到 state 参数")
-        state = state_match.group(1)
-
-        response = request_with_retry(
-            "POST",
-            "https://idm.swu.edu.cn/am/UI/Login",
-            data=data,
-            allow_redirects=True,
-            timeout=timeout,
-            session=session,
-        )
-        ticket = _find_query_value_from_response(response, "ticket")
-        if not ticket:
-            raise LoginError("credential", f"统一认证未返回 ticket，可能是账号密码错误或接口策略变化（{_login_response_hint(response)}）")
-
-        str1, str2 = _transform_ticket(ticket)
-        code = f"CD-{str1}-{str2}-wiie://777.643.675.751:3537/rph"
-        callback_url = urllib.parse.unquote(
-            f"https://of.swu.edu.cn/cas/oauth/callback/SWU_CAS2_FEDERAL?code={code}@@hxbeat&state={state}"
-        )
-        response = request_with_retry("GET", callback_url, allow_redirects=True, timeout=timeout, session=session)
-        st_ticket = _find_query_value_from_response(response, "ticket")
-        if not st_ticket:
-            raise LoginError("direct_login", f"CAS 回调后没有获取到 ST ticket（{_login_response_hint(response)}）")
-
-        token_response = request_with_retry(
-            "GET",
-            f"https://of.swu.edu.cn/gateway/fighter-middle/api/integrate/uaap/cas/exchange-token?token={st_ticket}&remember=true",
-            timeout=timeout,
-            session=session,
-        ).json()
-        token = token_response.get("data")
-        if not token:
-            raise LoginError("token_extract", f"交换 Token 失败：{token_response}")
-        return token
-    except LoginError:
-        raise
-    except requests.exceptions.RequestException as exc:
-        raise LoginError("page_load", f"纯 HTTP 登录链路请求失败: {exc}")
-    except Exception as exc:
-        raise LoginError("direct_login", f"纯 HTTP 登录链路失败: {exc}")
-
-
-def get_token(username: str, password: str, timeout=15, session=None, force_login: bool = False):
-    import os
+def get_token(
+    username: str,
+    password: str,
+    timeout=15,
+    session=None,
+    force_login: bool = False,
+    deadline=None,
+):
     cache_path = os.path.join(CONFIG_DIR, ".token_cache.json")
-    
+
+    _remaining_seconds(deadline)
     # Try cached token first (unless force_login is True)
     if not force_login:
         cached_token = _load_cached_token(username, cache_path)
         if cached_token:
             try:
-                get_student_id(cached_token, timeout=min(timeout, 5), session=session)
-                logger.info(f"账号 {username}: 使用缓存的有效 Token，跳过浏览器登录。")
+                cached_timeout = min(timeout, 5)
+                get_student_id(
+                    cached_token,
+                    timeout=cached_timeout,
+                    session=session,
+                    deadline=deadline,
+                )
+                logger.info("账号 %s: 使用缓存的有效 Token，跳过浏览器登录。", _debug_user_id(username))
                 return cached_token
-            except Exception:
-                logger.info(f"账号 {username}: 缓存的 Token 已失效，正在通过浏览器重新登录...")
-        else:
-            logger.info(f"账号 {username}: 未发现缓存的 Token，正在获取新 Token...")
-    else:
-        logger.info(f"账号 {username}: 收到强制登录参数，跳过缓存，正在获取新 Token...")
-
-    login_method = os.getenv("SWU_LOGIN_METHOD", "browser").strip().lower()
-    if login_method not in {"auto", "direct", "browser"}:
-        logger.warning(f"账号 {username}: SWU_LOGIN_METHOD={login_method} 无效，将使用 browser。")
-        login_method = "browser"
-
-    if login_method in {"auto", "direct"}:
-        try:
-            logger.info(f"账号 {username}: 正在尝试纯 HTTP 登录链路...")
-            token = get_token_direct(username, password, timeout=timeout, session=session)
-            _save_cached_token(username, token, cache_path)
-            logger.info(f"账号 {username}: 纯 HTTP 登录成功，Token 已缓存。")
-            return token
-        except LoginError as exc:
-            if login_method == "direct":
+            except TokenInvalidError:
+                logger.info("账号 %s: 缓存的 Token 已失效，正在通过浏览器重新登录...", _debug_user_id(username))
+            except DeadlineExceeded:
                 raise
-            logger.warning(f"账号 {username}: 纯 HTTP 登录失败，将回退到浏览器登录：{exc}")
+            except (requests.exceptions.RequestException, SwuRequestError, SwuBusinessError) as exc:
+                # A temporary network/API failure does not prove that the
+                # cached token is invalid. Propagate it to the caller instead
+                # of launching a browser and potentially hiding the outage.
+                logger.warning(
+                    "账号 %s: 暂时无法验证缓存 Token，停止本次运行并保留缓存：%s",
+                    _debug_user_id(username),
+                    _redact_text(exc),
+                )
+                raise
+        else:
+            logger.info("账号 %s: 未发现缓存的 Token，正在获取新 Token...", _debug_user_id(username))
+    else:
+        logger.info("账号 %s: 收到强制登录参数，跳过缓存，正在获取新 Token...", _debug_user_id(username))
 
     cas_url = (
         "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
@@ -684,10 +861,12 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
         "%252F%2523%252FcasLogin%253Ffrom%253D%25252FappCenter"
     )
 
-    logger.debug(f"账号 {username}: 正在启动 Playwright Chromium 浏览器...")
+    _remaining_seconds(deadline)
+    logger.debug("账号 %s: 正在启动 Playwright Chromium 浏览器...", _debug_user_id(username))
     with sync_playwright() as p:
         launch_options = {
             "headless": True,
+            "timeout": _browser_timeout_ms(timeout, deadline),
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
@@ -700,7 +879,7 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
         proxy_options = playwright_proxy_options()
         if proxy_options:
             launch_options["proxy"] = proxy_options
-            logger.info(f"账号 {username}: 浏览器登录将使用代理：{describe_proxy_config()}")
+            logger.info("账号 %s: 浏览器登录将使用代理：%s", _debug_user_id(username), describe_proxy_config())
         browser = p.chromium.launch(
             **launch_options
         )
@@ -729,60 +908,95 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
         page.route("**/*", handle_route)
 
         try:
-            logger.debug(f"账号 {username}: 正在访问 CAS 登录页面...")
+            logger.debug("账号 %s: 正在访问 CAS 登录页面...", _debug_user_id(username))
             # Load page with up to 2 retry attempts
             for attempt in range(1, 3):
+                _remaining_seconds(deadline)
                 try:
-                    page.goto(cas_url, wait_until="networkidle", timeout=timeout * 1000)
+                    page.goto(
+                        cas_url,
+                        wait_until="networkidle",
+                        timeout=_browser_timeout_ms(timeout, deadline),
+                    )
                     break
                 except Exception as e:
+                    _remaining_seconds(deadline)
                     if attempt == 2:
-                        raise LoginError("page_load", f"登录页加载失败或超时: {e}")
-                    logger.warning(f"账号 {username}: 页面加载失败 (第 {attempt} 次尝试): {e}。正在重新载入...")
-                    page.wait_for_timeout(2000)
+                        raise LoginError("page_load", f"登录页加载失败或超时: {_redact_text(e)}")
+                    logger.warning(
+                        "账号 %s: 页面加载失败 (第 %s 次尝试): %s。正在重新载入...",
+                        _debug_user_id(username),
+                        attempt,
+                        _redact_text(e),
+                    )
+                    page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
 
-            ensure_login_form(page, username, timeout, recovery_url=cas_url)
+            login_entry_url = page.url
+            ensure_login_form(page, username, timeout, recovery_url=cas_url, deadline=deadline)
 
             success = False
             # Try up to 3 times to solve captcha and submit
             for attempt in range(3):
-                logger.debug(f"账号 {username}: 正在填写登录表单并识别验证码 (尝试 {attempt + 1}/3)...")
-                ensure_login_form(page, username, timeout, recovery_url=cas_url)
+                _remaining_seconds(deadline)
+                logger.debug(
+                    "账号 %s: 正在填写登录表单并识别验证码 (尝试 %s/3)...",
+                    _debug_user_id(username),
+                    attempt + 1,
+                )
+                ensure_login_form(page, username, timeout, recovery_url=cas_url, deadline=deadline)
                 # Fill credentials
                 try:
-                    login_name_locator(page).fill(username, timeout=5000)
-                    password_locator(page).fill(password, timeout=5000)
+                    form_timeout = min(5000, _browser_timeout_ms(timeout, deadline))
+                    login_name_locator(page).fill(username, timeout=form_timeout)
+                    password_locator(page).fill(password, timeout=form_timeout)
                 except Exception as exc:
-                    recover_from_idm_error_page(page, username, timeout, recovery_url=cas_url)
+                    recover_from_idm_error_page(page, username, timeout, recovery_url=cas_url, deadline=deadline)
                     save_login_debug_artifacts(page, username, "fill_login_form_failed", exc)
-                    raise LoginError("login_page_changed", f"填写登录表单失败: {exc}")
+                    raise LoginError("login_page_changed", f"填写登录表单失败: {_redact_text(exc, [username, password])}")
 
                 # Capture captcha image bytes
                 captcha_el = captcha_locator(page)
-                img_bytes = get_captcha_image_bytes(page, captcha_el, timeout)
+                img_bytes = get_captcha_image_bytes(page, captcha_el, timeout, deadline=deadline)
 
                 # Solve captcha
                 ocr = get_ocr()
                 code = ocr.classification(img_bytes)
-                logger.debug(f"账号 {username}: 识别到验证码 = {code}")
+                logger.debug("账号 %s: 已识别验证码", _debug_user_id(username))
 
-                captcha_input_locator(page).fill(code)
+                captcha_input_locator(page).fill(
+                    code,
+                    timeout=_browser_timeout_ms(timeout, deadline),
+                )
 
                 # Click login
-                logger.debug(f"账号 {username}: 提交表单中...")
-                submit_button_locator(page).click()
+                logger.debug("账号 %s: 提交表单中...", _debug_user_id(username))
+                submit_button_locator(page).click(timeout=_browser_timeout_ms(timeout, deadline))
 
                 # Wait to check result
                 redirected = False
                 for step_check in range(5):
-                    page.wait_for_timeout(1000)
-                    logger.debug(f"账号 {username}: 等待重定向 (第 {step_check + 1} 秒)，当前 URL: {page.url}")
-                    if "of.swu.edu.cn" in page.url:
-                        redirected = True
+                    _remaining_seconds(deadline)
+                    page.wait_for_timeout(min(1000, _browser_timeout_ms(timeout, deadline)))
+                    logger.debug(
+                        "账号 %s: 等待重定向 (第 %s 秒)，当前 URL: %s",
+                        _debug_user_id(username),
+                        step_check + 1,
+                        _redact_url(page.url),
+                    )
+                    current_url = page.url
+                    redirected = (
+                        current_url != login_entry_url
+                        and (
+                            bool(_find_query_value_from_url(current_url, "ticket"))
+                            or "resolve-cas-return" in current_url
+                            or "casLogin" in current_url
+                        )
+                    )
+                    if redirected:
                         break
 
                 if redirected:
-                    logger.debug(f"账号 {username}: 重定向成功！")
+                    logger.debug("账号 %s: 重定向成功！", _debug_user_id(username))
                     success = True
                     break
 
@@ -795,16 +1009,17 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
 
                 if error_msg:
                     error_msg = error_msg.strip()
-                    logger.warning(f"账号 {username}: 登录页面返回错误信息: {error_msg}")
+                    safe_error_msg = _redact_text(error_msg, [username, password])
+                    logger.warning("账号 %s: 登录页面返回错误信息: %s", _debug_user_id(username), safe_error_msg)
                     if any(k in error_msg for k in ["密码", "账户", "用户名", "密码错误", "不正确"]):
                         if "验证码" not in error_msg:
-                            raise LoginError("credential", f"账号或密码错误: {error_msg}")
+                            raise LoginError("credential", f"账号或密码错误: {safe_error_msg}")
 
                 # If not redirected and no explicit credential error, refresh captcha and try again
                 try:
-                    logger.debug(f"账号 {username}: 验证码识别错误或重定向未触发，刷新验证码重试...")
-                    captcha_el.click()
-                    page.wait_for_timeout(1000)
+                    logger.debug("账号 %s: 验证码识别错误或重定向未触发，刷新验证码重试...", _debug_user_id(username))
+                    captcha_el.click(timeout=_browser_timeout_ms(timeout, deadline))
+                    page.wait_for_timeout(min(1000, _browser_timeout_ms(timeout, deadline)))
                 except Exception:
                     pass
 
@@ -813,21 +1028,24 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                 raise LoginError("captcha", "验证码连续识别失败，或登录服务没有完成跳转")
 
             # Extract token from localStorage
-            logger.debug(f"账号 {username}: 正在从 localStorage 提取 access_token...")
+            _remaining_seconds(deadline)
+            logger.debug("账号 %s: 正在从 localStorage 提取 access_token...", _debug_user_id(username))
             try:
-                page.wait_for_load_state("networkidle", timeout=timeout * 1000)
+                page.wait_for_load_state("networkidle", timeout=_browser_timeout_ms(timeout, deadline))
             except Exception:
-                page.wait_for_timeout(2000)
+                _remaining_seconds(deadline)
+                page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
 
             ticket = _find_query_value_from_url(page.url, "ticket")
             if ticket:
-                logger.debug(f"账号 {username}: 已从跳转地址获取 CAS ticket，正在直接交换 Token...")
-                token = exchange_token_from_browser_page(page, ticket, timeout)
+                logger.debug("账号 %s: 已从跳转地址获取 CAS ticket，正在交换 Token...", _debug_user_id(username))
+                token = exchange_token_from_browser_page(page, ticket, timeout, deadline=deadline)
                 if token:
                     _save_cached_token(username, token, cache_path)
-                    logger.debug(f"账号 {username}: 通过 CAS ticket 交换 Token 成功")
+                    logger.debug("账号 %s: 通过 CAS ticket 交换 Token 成功", _debug_user_id(username))
                     return token
 
+            _remaining_seconds(deadline)
             local_storage = page.evaluate("() => JSON.stringify(localStorage)")
             ls_dict = json.loads(local_storage)
 
@@ -860,10 +1078,14 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                 save_login_debug_artifacts(page, username, "token_extract_failed")
                 raise LoginError("token_extract", "登录成功后无法从 localStorage 中提取 Token")
 
+            if not isinstance(token, str) or not token:
+                raise LoginError("token_extract", "登录成功后提取到的 Token 格式无效")
             _save_cached_token(username, token, cache_path)
-            logger.debug(f"账号 {username}: Token 提取并缓存成功")
+            logger.debug("账号 %s: Token 提取并缓存成功", _debug_user_id(username))
             return token
 
+        except DeadlineExceeded:
+            raise
         except LoginError as exc:
             save_login_debug_artifacts(page, username, getattr(exc, "reason", "login_error"), exc)
             raise
@@ -874,28 +1096,98 @@ def get_token(username: str, password: str, timeout=15, session=None, force_logi
                 body_text = ""
             save_login_debug_artifacts(page, username, "unexpected_browser_error", e)
             if "动态口令验证失败" in body_text or "验证失败" in body_text:
-                raise LoginError("login_page_changed", f"统一认证错误页未能恢复到登录表单: {e}")
-            raise LoginError("unknown", f"获取令牌失败: {str(e)}")
+                raise LoginError("login_page_changed", f"统一认证错误页未能恢复到登录表单: {_redact_text(e, [username, password])}")
+            raise LoginError("unknown", f"获取令牌失败: {_redact_text(e, [username, password])}")
         finally:
             browser.close()
 
-def get_student_id(token, timeout=10, session=None):
+_SUCCESS_CODES = {0, 200, 1100, "0", "200", "1100"}
+_TOKEN_INVALID_CODES = {401, 403, 4010, 40101, 40102, "401", "403", "4010", "40101", "40102"}
+
+
+def _api_json(response, endpoint):
+    try:
+        body = response.json()
+    except (TypeError, ValueError) as exc:
+        raise SwuBusinessError(f"{endpoint} 返回的 JSON 无法解析: {exc}") from exc
+    if not isinstance(body, dict):
+        raise SwuBusinessError(f"{endpoint} 返回结构不是对象")
+
+    code = body.get("code")
+    message = body.get("msg", body.get("message", ""))
+    message_text = str(message) if message is not None else ""
+    token_hint = re.search(r"(?i)(token|登录已过期|登录失效|未授权|无效凭证|认证失败)", message_text)
+    if code in _TOKEN_INVALID_CODES or token_hint:
+        raise TokenInvalidError(
+            f"{endpoint} Token 无效",
+            status_code=401 if code is None else code,
+            response=response,
+        )
+    if code is not None and code not in _SUCCESS_CODES:
+        raise SwuBusinessError(f"{endpoint} 返回业务错误：code={code!r}, message={_redact_text(message_text)}")
+    return body
+
+
+def get_student_id(token, timeout=10, session=None, deadline=None):
     url = "https://of.swu.edu.cn/gateway/fighter-middle/api/auth/user?appType=fighter-portal"
     headers = {"fighter-auth-token": token}
-    response = request_with_retry("GET", url, headers=headers, timeout=timeout, session=session)
-    student_id = response.json()["data"]["subject"]["username"]
-    return student_id
+    response = request_with_retry(
+        "GET",
+        url,
+        headers=headers,
+        timeout=timeout,
+        session=session,
+        retryable=True,
+        deadline=deadline,
+    )
+    body = _api_json(response, "用户信息接口")
+    try:
+        student_id = body["data"]["subject"]["username"]
+    except (KeyError, TypeError) as exc:
+        raise SwuBusinessError(f"用户信息接口返回结构异常: {exc}") from exc
+    if not isinstance(student_id, (str, int)) or isinstance(student_id, bool) or not str(student_id):
+        raise SwuBusinessError("用户信息接口返回的学号无效")
+    return str(student_id)
 
-def get_dormitory(token, timeout=10, session=None):
+
+def get_dormitory(token, timeout=10, session=None, deadline=None):
     url = "https://of.swu.edu.cn/gateway/fighter-baida/api/cqlc/getDormitory"
     headers = {"fighter-auth-token": token, "Content-Type": "application/json;charset=UTF-8"}
-    response = request_with_retry("POST", url, headers=headers, data=json.dumps({}), timeout=timeout, session=session)
-    return response.json()
+    response = request_with_retry(
+        "POST",
+        url,
+        headers=headers,
+        data=json.dumps({}),
+        timeout=timeout,
+        session=session,
+        retryable=True,
+        deadline=deadline,
+    )
+    return _api_json(response, "宿舍信息接口")
 
-def get_transition_today(token, timeout=10, session=None):
+
+def get_transition_today(token, timeout=10, session=None, deadline=None):
     url = "https://of.swu.edu.cn//gateway/fighter-baida/api/cqtj/getTransitionByToday"
     headers = {"fighter-auth-token": token}
     data = {"pageNum": 1, "pageSize": 1}
-    response = request_with_retry("POST", url, headers=headers, data=data, timeout=timeout, session=session)
-    records = response.json()["data"]["records"]
-    return records[0] if records else None
+    response = request_with_retry(
+        "POST",
+        url,
+        headers=headers,
+        data=data,
+        timeout=timeout,
+        session=session,
+        retryable=True,
+        deadline=deadline,
+    )
+    body = _api_json(response, "今日签到任务接口")
+    try:
+        records = body["data"]["records"]
+    except (KeyError, TypeError) as exc:
+        raise SwuBusinessError(f"今日签到任务接口返回结构异常: {exc}") from exc
+    if not isinstance(records, list):
+        raise SwuBusinessError("今日签到任务接口 records 不是数组")
+    record = records[0] if records else None
+    if record is not None and not isinstance(record, dict):
+        raise SwuBusinessError("今日签到任务接口记录不是对象")
+    return record

@@ -6,15 +6,14 @@ on:
     - cron: "5 13 * * *"
   workflow_dispatch:
     inputs:
-      login_method:
-        description: "登录方式：browser 使用当前登录页；auto 会先尝试历史 direct；direct 目前多半不可用，仅保留诊断。"
-        required: true
-        default: browser
-        type: choice
-        options:
-          - browser
-          - auto
-          - direct
+      debug:
+        description: "失败时保存脱敏登录诊断文本"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 concurrency:
   group: swu-check-in
@@ -28,15 +27,16 @@ jobs:
       TZ: Asia/Shanghai
       SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
       SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
-      SWU_LOGIN_METHOD: ${{ github.event_name == 'workflow_dispatch' && inputs.login_method || 'browser' }}
       SWU_LOG_LEVEL: INFO
-      SWU_DEBUG_DIR: debug
+      SWU_RUN_DEADLINE_SECONDS: "900"
+      SWU_DEBUG_DIR: ${{ inputs.debug == true && 'debug' || '' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Prepare debug directory
+        if: ${{ inputs.debug == true }}
         run: mkdir -p debug
 
       - name: Set up Python
@@ -48,23 +48,23 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install Chromium for browser login
-        if: ${{ env.SWU_LOGIN_METHOD != 'direct' }}
         run: playwright install chromium
 
       - name: Check configuration
         run: python check_in.py --check-config
 
       - name: Run check-in
-        run: python -u check_in.py --no-lock
+        run: python -u check_in.py
 
       - name: List debug files
-        if: always()
+        if: ${{ always() && inputs.debug == true }}
         run: find debug -maxdepth 2 -type f -print || true
 
       - name: Upload login debug artifacts
-        if: always()
+        if: ${{ always() && inputs.debug == true }}
         uses: actions/upload-artifact@v4
         with:
           name: login-debug
           path: debug/
           if-no-files-found: ignore
+          retention-days: 3
