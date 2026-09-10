@@ -2,236 +2,143 @@
 
 # swu-checkin-cli
 
-西南大学自动打卡命令行工具，支持多账号、Docker 部署、定时任务、数字菜单和多通道机器人推送。
+西南大学自动打卡命令行工具，使用浏览器登录，支持多账号、数字菜单、Docker、GitHub Actions 和多通道推送。
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/python/)
 [![License](https://img.shields.io/github/license/Cart042/swu-checkin-cli)](LICENSE)
-[![Repo](https://img.shields.io/badge/GitHub-Cart042%2Fswu--checkin--cli-181717?logo=github)](https://github.com/Cart042/swu-checkin-cli)
-
-`python check_in.py -m` 打开数字菜单，按数字即可添加账号、配置推送、检查状态或立即运行。
 
 </div>
 
-## 部署位置提醒
+## 能力
 
-目前脚本已经通过浏览器登录链路验证，可以在海外服务器和 GitHub Actions 中运行。学校官网偶尔仍可能受网络出口、登录页策略或临时维护影响；如果遇到登录页加载超时、连接失败或接口异常，可以先手动重跑一次 workflow，或改用能稳定访问学校官网的服务器。
+- 浏览器登录学校统一认证页面，自动识别登录页验证码并获取 Token。
+- 使用 `users.json` 或环境变量管理多个账号。
+- 用 `python check_in.py -m` 打开数字菜单，配置账号、并发、代理和推送。
+- 使用 Docker Compose 在 VPS 上运行一次性任务。
+- 使用 GitHub Actions 在每天北京时间 21:05（UTC 13:05）定时运行，也可以手动运行。
+- 支持钉钉、企业微信、Bark、Server 酱和 PushDeer 推送。
 
-脚本会自动尝试直连学校官网，也会自动读取服务器已有的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 环境变量。大多数情况下无需额外配置代理；只有当你的服务器无法访问学校官网时，才需要配置可信代理出口。
-
-## 亮点
-
-| 能力 | 说明 |
-| --- | --- |
-| 多账号签到 | 支持 `users.json`、环境变量和命令行临时账号，适合个人或少量账号集中管理。 |
-| 交互式菜单 | SSH 中输入 `python check_in.py -m` 即可通过数字菜单配置账号、推送、并发、缓存和学校官网代理。 |
-| Docker 友好 | 默认使用 `/data` 保存配置、Token 缓存和运行锁，容器删除后数据不丢。 |
-| 双登录链路 | 支持历史纯 HTTP 登录和浏览器登录；原始项目已说明历史登录接口不可用，当前以浏览器链路为主。 |
-| 定时任务稳妥 | 内置运行锁，避免 cron 重叠触发导致重复启动浏览器或重复签到。 |
-| 推送结果 | 支持钉钉、企业微信、Bark、Server 酱和 PushDeer。 |
-| 错误更清楚 | 对登录失败、验证码失败、接口异常、Token 失效等情况给出更细状态。 |
+学校官网的网络出口和登录页策略会影响运行结果。海外服务器需要能访问学校官网，或配置可信的中国大陆代理出口。
 
 ## 快速开始
 
 ```bash
 git clone https://github.com/Cart042/swu-checkin-cli.git
 cd swu-checkin-cli
+python3.11 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 python check_in.py -m
 ```
 
-如果你在 VPS 上部署，推荐优先使用 Docker Compose：
+菜单会引导你添加一个或多个账号。也可以手动复制示例文件：
 
 ```bash
-git clone https://github.com/Cart042/swu-checkin-cli.git
-cd swu-checkin-cli
-mkdir -p data logs
-docker compose build
-docker compose run --rm -it swu-checkin python check_in.py -m
+cp users.json.example users.json
+cp .env.example .env
 ```
 
-VPS 可以选择中国大陆内机房，也可以选择海外服务器；关键是服务器需要能稳定访问学校官网。仓库内置的 GitHub Actions workflow 目前也可以手动或定时运行。
+先检查配置和依赖：
 
-## 命令速查
-
-| 场景 | 命令 |
-| --- | --- |
-| 打开数字菜单 | `python check_in.py -m` |
-| 检查配置和依赖 | `python check_in.py --check-config` |
-| 执行一次签到 | `python check_in.py` |
-| 临时指定账号 | `python check_in.py -u your_username -p your_password` |
-| 强制重新登录 | `python check_in.py --force-login` |
-| Docker 打开菜单 | `docker compose run --rm -it swu-checkin python check_in.py -m` |
-| Docker 执行一次 | `docker compose run --rm swu-checkin` |
-
-## 文件结构
-
-```text
-.
-├── .github/workflows    # GitHub Actions 手动和定时运行配置
-├── check_in.py          # 主程序入口：签到流程、菜单、配置检查、运行锁和推送汇总
-├── get_info.py          # 登录、验证码识别、Token 获取和学校接口
-├── notify.py            # 钉钉、企业微信、Bark、Server 酱、PushDeer 推送
-├── verify.py            # 账号验证入口
-├── des.py               # DES 相关逻辑
-├── Dockerfile           # Docker 镜像构建文件
-├── docker-compose.yml   # Docker Compose 配置
-├── FILES.md             # 仓库文件用途备注
-├── requirements.txt     # Python 依赖
-├── users.json.example   # 多账号配置示例
-├── .env.example         # 环境变量配置模板
-└── README.md
+```bash
+python check_in.py --check-config
 ```
 
-更多文件说明见 [FILES.md](FILES.md)。
+## 账号配置
 
-## 配置账号
+程序按以下顺序读取账号：
 
-脚本按以下优先级读取账号配置：
+1. 命令行 `-u` / `-p`。
+2. 配置目录中的 `users.json`。
+3. `SWU_USERS` 环境变量中的 JSON 数组。
+4. `SWU_USERNAME` / `SWU_PASSWORD`。
 
-1. 命令行参数 `-u` / `-p`
-2. 当前配置目录下的 `users.json`
-3. 环境变量 `SWU_USERS`
-4. 环境变量 `SWU_USERNAME` / `SWU_PASSWORD`
-
-推荐复制 `users.json.example` 为 `users.json`：
+`users.json` 示例：
 
 ```json
 [
   {
     "username": "你的校园网账号",
     "password": "你的密码"
+  },
+  {
+    "username": "另一个校园网账号",
+    "password": "另一个密码"
   }
 ]
 ```
 
-也可以复制 `.env.example` 为 `.env`，用环境变量配置账号、并发数和推送渠道。
+默认配置目录是脚本所在目录；Docker 中是 `/data`。账号文件、`.env`、Token 缓存和运行锁都应只保存在本地或挂载的数据目录，不要提交到仓库。
 
 ## 数字菜单
-
-不想手动编辑 JSON 或 `.env` 时，直接打开交互式菜单：
 
 ```bash
 python check_in.py -m
 ```
 
-菜单支持：
+菜单可以：
 
-- 查看配置检查
-- 查看、添加、删除账号
-- 修改账号密码
-- 设置并发线程数
-- 配置和测试推送通道
-- 配置学校官网代理
-- 查看配置文件路径
-- 清除 Token 缓存
-- 立即执行一次打卡
+- 查看配置和依赖检查结果；
+- 查看、添加、删除账号和修改密码；
+- 设置最大并发数；
+- 配置和测试推送通道；
+- 配置学校官网代理；
+- 查看配置路径、清除 Token 缓存；
+- 立即运行一次打卡。
 
-账号密码会写入配置目录中的 `users.json`，推送配置和并发数会写入配置目录中的 `.env`。默认配置目录是脚本当前目录；Docker 中默认是 `/data`。
+菜单写入的账号文件和 `.env` 位于当前配置目录。账号列表和日志中的账号标识会尽量使用掩码显示。
 
-## 海外服务器和 GitHub Actions
+## GitHub Actions
 
-目前海外服务器和 GitHub Actions 均可通过浏览器登录链路运行。实际稳定性主要取决于服务器能否访问学校官网，以及当前学校登录页结构是否能被脚本识别。
+工作流文件是 `.github/workflows/swu-check.yml`。运行前，在仓库的 **Settings → Secrets and variables → Actions** 中添加：
 
-登录链路默认使用 `SWU_LOGIN_METHOD=browser`，即直接通过 Playwright 浏览器登录当前学校统一认证页面。
+- `SWU_USERNAME`
+- `SWU_PASSWORD`
 
-如果显式设置 `SWU_LOGIN_METHOD=auto`，脚本会先尝试历史纯 HTTP 登录；该链路来自原始项目思路，不启动浏览器、不识别验证码，但原始项目已说明该登录接口不可用，失败后会回退到浏览器登录。
+工作流保留每天北京时间 21:05 的定时触发、手动触发和并发保护。手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
 
-如果你要在 GitHub Actions 中运行或排查当前页面结构，建议使用：
+工作流使用 Python 3.11、浏览器登录和 Chromium。网络或登录页偶发异常时，优先手动重跑，再下载调试 artifact 查看页面结构变化。
+
+仓库另有 `Offline PR CI` 工作流。它只执行 Python 源码编译、离线单元测试和命令行帮助检查，不登录学校网站、不执行签到，也不需要真实账号。
+
+## Docker
+
+Docker 镜像使用 Python 3.11 和 Playwright Chromium。推荐将 `/data` 挂载到宿主机保存账号和缓存：
 
 ```bash
-SWU_LOGIN_METHOD=browser
-SWU_DEBUG_DIR=debug
+mkdir -p data
+docker compose build
+docker compose run --rm -it swu-checkin python check_in.py -m
+docker compose run --rm swu-checkin
 ```
 
-网络路径按以下顺序处理：
-
-1. 如果配置了 `SWU_PROXY_URL`，优先通过它访问学校官网。
-2. 未配置 `SWU_PROXY_URL` 时，自动读取服务器已有的标准代理变量：`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`。
-3. 如果没有任何代理配置，则直接访问学校官网。
-
-如果服务器无法直连学校官网，也没有任何可用代理或隧道，脚本无法凭空绕过网络限制。出于账号安全考虑，本项目不会内置公共代理池。
-
-如需手动指定可信代理，可配置：
+也可以通过环境变量传入单个账号：
 
 ```bash
+SWU_USERNAME=your_username SWU_PASSWORD=your_password \
+  docker compose run --rm swu-checkin
+```
+
+不要把真实账号、`.env`、Token 缓存、日志、调试目录或运行锁放入镜像。`.dockerignore` 已排除这些运行文件。
+
+## 网络和代理
+
+没有代理时，程序直接访问学校官网。需要代理时，可以在 `.env` 或运行环境中设置：
+
+```dotenv
 SWU_PROXY_URL=http://proxy.example.com:7890
 SWU_PROXY_USERNAME=
 SWU_PROXY_PASSWORD=
 ```
 
-也可以通过数字菜单配置：
+也可以使用标准的 `HTTPS_PROXY`、`HTTP_PROXY` 或 `ALL_PROXY`。`SWU_PROXY_URL` 优先级更高。代理支持 `http://`、`https://`、`socks4://` 和 `socks5://`。在菜单中选择“配置学校官网代理”也会写入这些配置。
 
-```bash
-python check_in.py -m
-```
+## 推送
 
-进入菜单后选择“配置学校官网代理”。Docker Compose 部署时，代理配置会写入挂载的 `./data/.env`，后续定时任务会自动读取。
-
-说明：
-
-- `SWU_PROXY_URL` 优先级高于服务器已有的 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。
-- `SWU_PROXY_URL` 支持 `http://`、`https://`、`socks4://`、`socks5://` 形式；省略协议时按 `http://` 处理。
-- `SWU_PROXY_USERNAME` / `SWU_PROXY_PASSWORD` 仅在代理需要认证时填写。
-- 标准代理环境变量和 `SWU_PROXY_URL` 都只用于学校官网登录和学校接口请求；推送通道仍按各平台网络情况直接访问。
-- 海外服务器和 GitHub Actions 目前可以运行；如果某次因学校官网网络波动失败，建议先手动重跑。
-- 使用 GitHub Actions 时，请只通过 Repository secrets 保存账号密码，不要把真实账号写入仓库文件。
-
-## GitHub Actions 自动运行
-
-仓库提供了可手动触发、也可定时运行的 workflow：`.github/workflows/swu-check.yml`。它默认使用 `SWU_LOGIN_METHOD=browser`，并在登录页元素识别失败时上传 `login-debug` artifact，里面包含截图和 HTML，便于定位 GitHub Actions 上实际打开的页面。
-
-使用前需要在 GitHub 仓库 `Settings` -> `Secrets and variables` -> `Actions` 中添加：
-
-- `SWU_USERNAME`
-- `SWU_PASSWORD`
-
-然后进入 `Actions` -> `SWU Check-in` -> `Run workflow` 手动触发。登录方式建议先选 `browser`。如果失败，请在运行详情里下载 `login-debug` artifact，再根据截图和 HTML 判断是否是页面结构变化、验证码策略变化或账号认证异常。
-
-当前 workflow 已开启定时任务：每天北京时间 21:05 自动运行。GitHub cron 使用 UTC 时间，因此配置为 `5 13 * * *`。
-
-## Docker 部署
-
-镜像默认从 `/data` 读取和保存配置。建议把宿主机的 `./data` 目录挂载进去，这样 `users.json`、`.env`、`.token_cache.json` 和 `.run.lock` 都会持久保存。
-
-```bash
-mkdir -p data
-docker compose build
-docker compose run --rm swu-checkin
-```
-
-在 Docker 中打开数字菜单：
-
-```bash
-docker compose run --rm -it swu-checkin python check_in.py -m
-```
-
-## 定时任务
-
-推荐在 VPS 宿主机上用 `cron` 定时调用 Docker Compose。容器保持一次性运行，配置、日志和 Token 缓存保存在宿主机目录中。
-
-定时任务可以部署在 VPS 上，也可以直接使用仓库内置的 GitHub Actions 定时任务。目前海外服务器和 GitHub Actions 均已验证可运行；如果某次遇到学校官网网络波动或登录策略变化，建议先手动重跑并查看 `login-debug` artifact。
-
-```bash
-mkdir -p data logs
-crontab -e
-```
-
-示例：每天 22:10 运行一次，并把日志写入 `logs/checkin.log`：
-
-```cron
-10 22 * * * cd /path/to/swu-checkin-cli && docker compose run --rm swu-checkin >> logs/checkin.log 2>&1
-```
-
-脚本内置运行锁，锁文件保存在配置目录的 `.run.lock`。如果上一次任务还没结束，下一次定时触发会自动跳过。默认超过 2 小时的锁会被视为过期锁并自动清理，可以通过 `SWU_LOCK_STALE_SECONDS` 调整。
-
-如果一轮批次中存在未完成账号，脚本会等待 5 分钟后仅重试未完成账号，并循环直到所有账号完成。默认间隔可通过 `SWU_RETRY_INTERVAL_SECONDS` 调整。
-
-## 推送配置
-
-在 `.env` 或运行环境中设置对应变量即可启用推送：
+在 `.env` 或运行环境中按需填写：
 
 | 渠道 | 环境变量 |
 | --- | --- |
@@ -241,50 +148,70 @@ crontab -e
 | Server 酱 | `PUSH_SERVERCHAN_KEY` |
 | PushDeer | `PUSH_PUSHDEER_KEY` |
 
-未配置任何推送渠道时，脚本只在日志中输出结果。
+未配置推送时，结果仍会写入日志。
 
 ## 常用环境变量
 
 | 变量 | 说明 |
 | --- | --- |
-| `SWU_USERNAME` | 单账号用户名 |
-| `SWU_PASSWORD` | 单账号密码 |
-| `SWU_USERS` | 多账号 JSON 字符串 |
+| `SWU_USERNAME` / `SWU_PASSWORD` | 单账号用户名和密码 |
+| `SWU_USERS` | 多账号 JSON 数组 |
+| `SWU_CONFIG_DIR` | 配置目录，默认脚本目录；Docker 默认 `/data` |
 | `SWU_MAX_WORKERS` | 最大并发线程数，默认 `3` |
-| `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`，可选 `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `SWU_LOGIN_METHOD` | 登录方式，默认 `browser`；可选 `auto` 先尝试历史纯 HTTP 登录后回退浏览器、`direct` 纯 HTTP 登录、`browser` 浏览器登录 |
-| `SWU_CONFIG_DIR` | 配置目录，默认脚本当前目录；Docker 镜像中默认 `/data` |
-| `SWU_LOCK_STALE_SECONDS` | 运行锁过期时间，默认 `7200` 秒 |
 | `SWU_RETRY_INTERVAL_SECONDS` | 失败账号重试间隔，默认 `300` 秒 |
-| `SWU_PROXY_URL` | 学校官网代理地址，海外 VPS 运行时可填写中国大陆代理出口 |
-| `SWU_PROXY_USERNAME` | 学校官网代理用户名，无认证可留空 |
-| `SWU_PROXY_PASSWORD` | 学校官网代理密码，无认证可留空 |
-| `SWU_PROXY_MODE` | 代理模式，默认 `auto`；设为 `manual` 时只读取 `SWU_PROXY_URL`，设为 `off` 时禁用代理 |
-| `SWU_DEBUG_DIR` | 登录调试快照目录，设置后仅在登录异常时保存页面截图、HTML 和摘要，不保存验证码图片 |
+| `SWU_MAX_ROUNDS` | 失败账号最多重试轮数，默认 `3` |
+| `SWU_RUN_DEADLINE_SECONDS` | 单次任务总时限，默认 `900` 秒 |
+| `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`；可选 `DEBUG`、`WARNING`、`ERROR` |
+| `SWU_DEBUG_DIR` | 登录异常调试目录；仅排查问题时设置，例如 `debug` |
+| `SWU_PROXY_MODE` | 代理模式，默认 `auto`；也可设为 `manual` 或 `off` |
+| `SWU_PROXY_URL` | 学校官网代理地址 |
+| `SWU_PROXY_USERNAME` / `SWU_PROXY_PASSWORD` | 代理认证信息 |
 
-## 返回状态
+失败账号的重试预算默认是 900 秒，重试轮数默认 3 轮；每次网络和浏览器操作都会按剩余预算设置超时。可通过 `SWU_RUN_DEADLINE_SECONDS` 调整预算（允许范围由程序校验）。
+
+## 状态码
 
 | 状态码 | 含义 |
 | --- | --- |
 | `0` | 今日暂无签到任务 |
 | `1` | 签到成功 |
-| `2` | 今日已签到，无需重复操作 |
+| `2` | 今日已签到 |
 | `3` | 账号或密码验证失败 |
 | `4` | 连接错误或请求超时 |
-| `5` | 请假中，请检查是否有打卡任务 |
-| `6` | 登录页加载失败或超时，可能是学校服务或网络异常 |
+| `5` | 请假中或没有打卡任务 |
+| `6` | 登录页加载失败或超时 |
 | `7` | 验证码连续识别失败 |
-| `8` | 登录成功但 Token 提取失败，可能是页面结构变化 |
-| `9` | 学校登录页结构可能变化 |
-| `10` | 学校接口返回异常，可能是服务暂时不可用 |
-| `11` | Token 校验失败或已失效，可尝试 `--force-login` |
+| `8` | 登录成功但 Token 提取失败 |
+| `9` | 登录页结构可能变化 |
+| `10` | 学校接口返回异常 |
+| `11` | Token 校验失败或已失效 |
 
-## 安全提示
+## 文件结构
 
-- 不要提交真实的 `users.json`、`.env`、`.token_cache.json`。
-- VPS 上建议限制项目目录权限，只让当前部署用户可读写。
-- 如果怀疑账号或 Token 泄露，请先修改校园网密码，再删除 `.token_cache.json` 并使用 `--force-login` 重新登录。
+```text
+.
+├── .github/workflows       # 定时、手动和离线 PR 检查
+├── check_in.py             # 签到流程、菜单、配置检查、运行锁和结果汇总
+├── get_info.py             # 浏览器登录、验证码、Token 和学校接口
+├── notify.py               # 推送渠道
+├── runner.py               # 多账号并发、重试和汇总
+├── Dockerfile              # Python 3.11 + Playwright 镜像
+├── docker-compose.yml      # Docker Compose 配置
+├── FILES.md                # 文件用途说明
+├── requirements.txt        # Python 依赖
+├── users.json.example      # 多账号示例
+├── .env.example            # 环境变量模板
+└── README.md
+```
+
+更多文件说明见 [FILES.md](FILES.md)。
+
+## 安全
+
+- 只通过本地 `.env`、`users.json` 或 GitHub Secrets 保存真实凭据。
+- 不要提交 `.env`、`users.json`、`.token_cache.json`、`data/`、`logs/`、`debug/` 或 `.run.lock`。
+- 如果怀疑账号或 Token 泄露，请先修改校园网密码，再删除 Token 缓存并使用 `--force-login` 重新登录。
 
 ## Credits
 
-核心打卡逻辑基于开源项目 [ptbb2005/swu-checkin](https://github.com/ptbb2005/swu-checkin)，本项目在命令行、多账号、缓存、Docker 部署和推送体验上做了整理。
+核心打卡逻辑基于开源项目 [ptbb2005/swu-checkin](https://github.com/ptbb2005/swu-checkin)，本项目在浏览器登录、多账号、缓存、Docker 部署和推送体验上做了整理。

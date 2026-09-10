@@ -4,9 +4,28 @@ import json
 import logging
 import sys
 import atexit
+import tempfile
+import contextlib
+import re
+import errno
 
 try:
-    from get_info import *
+    from get_info import (
+        DeadlineExceeded,
+        SwuBusinessError,
+        SwuRequestError,
+        TokenInvalidError,
+        apply_proxy_to_session,
+        check_school_connectivity,
+        describe_proxy_config,
+        get_dormitory,
+        get_student_id,
+        get_token,
+        get_transition_today,
+        request_with_retry,
+        setup_logging,
+        validate_proxy_config,
+    )
     GET_INFO_IMPORT_ERROR = None
 except ImportError as exc:
     GET_INFO_IMPORT_ERROR = exc
@@ -62,8 +81,23 @@ except ImportError as exc:
     def check_school_connectivity(timeout=5):
         return False, f"依赖未加载，无法检查学校官网连通性：{GET_INFO_IMPORT_ERROR}"
 
-    def has_school_proxy_config():
-        return describe_proxy_config() != "未配置"
+    class DeadlineExceeded(Exception):
+        pass
+
+    class SwuRequestError(Exception):
+        status_code = None
+
+    class SwuBusinessError(Exception):
+        pass
+
+    class TokenInvalidError(SwuRequestError):
+        pass
+
+    def _missing_get_info(*args, **kwargs):
+        raise GET_INFO_IMPORT_ERROR
+
+    get_dormitory = get_student_id = get_token = get_transition_today = _missing_get_info
+    request_with_retry = _missing_get_info
 
 try:
     import requests
@@ -72,15 +106,15 @@ except ImportError as exc:
     requests = None
     REQUESTS_IMPORT_ERROR = exc
 
-from des import des
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
 
 # Load environment variables from .env file if it exists
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(CONFIG_DIR, ".env"))
+    # Values written by the menu are quoted and must remain literal. In
+    # particular, a proxy secret containing ``${...}`` must not be expanded.
+    load_dotenv(os.path.join(CONFIG_DIR, ".env"), interpolate=False)
 except ImportError:
     pass
 
@@ -107,8 +141,49 @@ LOGIN_REASON_STATUS = {
     "captcha": 7,
     "token_extract": 8,
     "login_page_changed": 9,
-    "direct_login": 10,
 }
+
+RETRYABLE_STATUSES = {4, 6, 10, 11}
+TERMINAL_SUCCESS_STATUSES = {0, 1, 2, 5}
+
+
+def _atomic_write_text(path, content, mode=0o600):
+    """Write a sensitive configuration file without exposing partial contents."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    fd, temporary_path = tempfile.mkstemp(prefix=".swu-write-", dir=directory, text=True)
+    try:
+        # ``fchmod`` is unavailable on Windows. ``mkstemp`` already creates
+        # a private file there; chmod the path as a best effort fallback.
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            try:
+                fchmod(fd, mode)
+            except (AttributeError, NotImplementedError, OSError):
+                os.chmod(temporary_path, mode)
+        else:
+            os.chmod(temporary_path, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            if hasattr(os, "fsync"):
+                os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary_path)
+        raise
+
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -117,102 +192,224 @@ for stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-def check_in(username: str, password: str, timeout: int = 10, force_login: bool = False):
+def _api_body(response, endpoint):
+    """Decode an API body and turn malformed payloads into business failures."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError) as exc:
+        raise SwuBusinessError(f"{endpoint} 返回的 JSON 无法解析: {exc}") from exc
+    if not isinstance(body, dict):
+        raise SwuBusinessError(f"{endpoint} 返回结构不是对象")
+    return body
+
+
+def _is_leave_result(body):
+    """Recognize only an explicit leave flag or exact status text.
+
+    A generic error mentioning leave must remain a business error instead of
+    being reported as the benign ``请假中`` status.
+    """
+    for key in ("isVacation", "is_vacation", "vacation", "hasLeave", "has_leave", "leave"):
+        value = body.get(key)
+        if isinstance(value, bool):
+            return value
+    data = body.get("data")
+    if isinstance(data, dict):
+        for key in ("isVacation", "is_vacation", "vacation", "hasLeave", "has_leave", "leave"):
+            value = data.get(key)
+            if isinstance(value, bool):
+                return value
+    for key in ("message", "msg", "status"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip() in {"请假中", "当前处于请假状态"}:
+            return True
+    return None
+
+
+def vacation_enable(token, timeout, session, deadline=None):
+    headers = {"fighter-auth-token": token}
+    url = "https://of.swu.edu.cn/gateway/fighter-baida/api/flow-ext/start-process-instance-by-key"
+    params = {"processDefinitionKey": "XSQJXJ"}
+    response = request_with_retry(
+        "POST",
+        url,
+        headers=headers,
+        params=params,
+        json={},
+        timeout=timeout,
+        session=session,
+        retryable=False,
+        deadline=deadline,
+    )
+    body = _api_body(response, "请假状态接口")
+    code = body.get("code")
+    if code in {200, 1100, "200", "1100"}:
+        return False
+    leave_result = _is_leave_result(body)
+    if leave_result is True:
+        return True
+    raise SwuBusinessError(f"请假状态接口返回未知业务结果：code={code!r}")
+
+
+def _checkin_payload(token, timeout, session, transition_today, deadline=None):
+    try:
+        formid = transition_today["formId"]
+        record_id = transition_today["id"]
+        dormitory_body = get_dormitory(token, timeout, session=session, deadline=deadline)
+        dormitory = dormitory_body["data"]["columnList"]
+        student_id = get_student_id(token, timeout=timeout, session=session, deadline=deadline)
+        return {
+            "id": record_id,
+            "formId": formid,
+            "tsrq": time.strftime("%Y-%m-%d"),
+            "xh": student_id,
+            "qdsj": ["21:00", "23:30"],
+            "qsqddd": dormitory[1]["value"],
+            "qdbj": dormitory[2]["value"],
+            "qddz": {
+                "latitude": dormitory[0]["latitude"],
+                "longitude": dormitory[0]["longitude"],
+                "address": dormitory[1]["value"],
+                "netType": "wifi",
+                "operatorType": "unknown",
+                "imei": "imei",
+                "time": int(time.time() * 1000),
+                "provider": "lbs",
+                "isFromMock": False,
+                "isGpsEnabled": True,
+                "isWifiEnabled": True,
+                "isMobileEnabled": False,
+                "isOffset": True,
+                "cityAdCode": "023",
+                "districtAdCode": "500109",
+                "isArea": True,
+                "tip": "当前在签到范围内",
+            },
+        }, formid
+    except (KeyError, IndexError, TypeError) as exc:
+        raise SwuBusinessError(f"签到所需的宿舍或任务结构异常: {exc}") from exc
+
+
+def checkin_post(token, timeout, session, transition_today, deadline=None):
+    """Submit once, then verify state; never blindly re-submit after a timeout."""
+    if transition_today is None:
+        return None
+    payload, formid = _checkin_payload(token, timeout, session, transition_today, deadline=deadline)
+    headers = {"fighter-auth-token": token, "Content-Type": "application/json;charset=UTF-8"}
+    url = "https://of.swu.edu.cn/gateway/fighter-baida/api/form-instance/save"
+    params = {"formId": formid, "isSubmitProcess": False}
+
+    try:
+        response = request_with_retry(
+            "POST",
+            url,
+            headers=headers,
+            params=params,
+            data=json.dumps(payload),
+            timeout=timeout,
+            session=session,
+            retryable=False,
+            deadline=deadline,
+        )
+        body = _api_body(response, "签到提交接口")
+        code = body.get("code")
+        if code is not None and code not in {0, 200, 1100, "0", "200", "1100"}:
+            raise SwuBusinessError(f"签到提交接口返回业务失败：code={code!r}, message={body.get('msg', body.get('message', ''))}")
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
+        logger.warning("签到写请求结果未知，先查询今日状态，不重复提交：%s", exc)
+        try:
+            after_timeout = get_transition_today(token, timeout, session=session, deadline=deadline)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as query_exc:
+            logger.error("签到写请求超时且复查失败：%s", query_exc)
+            return 4
+        if _same_checked_in_record(after_timeout, transition_today):
+            return 1
+        return 4
+
+    # A successful HTTP response is not proof of a successful business action.
+    try:
+        after_submit = get_transition_today(token, timeout, session=session, deadline=deadline)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
+        logger.error("签到提交后复查失败：%s", exc)
+        return 4
+    if _same_checked_in_record(after_submit, transition_today):
+        return 1
+    raise SwuBusinessError("签到提交接口未在复查中确认已签到")
+
+
+def _same_checked_in_record(candidate, submitted_record):
+    if (
+        not isinstance(candidate, dict)
+        or not isinstance(submitted_record, dict)
+        or candidate.get("qdzt") != "已签到"
+    ):
+        return False
+    return (
+        str(candidate.get("id")) == str(submitted_record.get("id"))
+        and str(candidate.get("formId")) == str(submitted_record.get("formId"))
+    )
+
+
+def check_in(username: str, password: str, timeout: int = 10, force_login: bool = False, deadline=None):
+    if requests is None:
+        logger.error("requests 依赖未安装")
+        return 10
     session = requests.Session()
     apply_proxy_to_session(session)
-
-    def vacation_enable(token, timeout, session):
-        headers = {
-            "fighter-auth-token": token
-        }
-        url = 'https://of.swu.edu.cn/gateway/fighter-baida/api/flow-ext/start-process-instance-by-key'
-        params = {'processDefinitionKey': 'XSQJXJ'}
-        response = request_with_retry("POST", url, headers=headers, params=params, json={}, timeout=timeout, session=session)
-        code = response.json()["code"]
-        if code == 200 or code == 1100:
-            return 0
-        else:
-            return 1
-
-    def checkin_post(token, timeout, session, transition_today):
+    try:
         try:
-            if transition_today is None:
-                return None
-            formid = transition_today["formId"]
-            id = transition_today["id"]
-            headers = {"fighter-auth-token": token, "Content-Type": "application/json;charset=UTF-8"}
-            url = "https://of.swu.edu.cn/gateway/fighter-baida/api/form-instance/save"
-            params = {"formId": formid, "isSubmitProcess": False}
-            dormitory = get_dormitory(token, timeout, session=session)["data"]["columnList"]
-            payload = {
-                "id": id,
-                "formId": formid,
-                "tsrq": time.strftime("%Y-%m-%d"),
-                "xh": get_student_id(token, session=session),
-                "qdsj": ["21:00", "23:30"],
-                "qsqddd": dormitory[1]["value"],
-                "qdbj": dormitory[2]["value"],
-                "qddz": {
-                    "latitude": dormitory[0]["latitude"],
-                    "longitude": dormitory[0]["longitude"],
-                    "address": dormitory[1]["value"],
-                    "netType": "wifi",
-                    "operatorType": "unknown",
-                    "imei": "imei",
-                    "time": int(time.time() * 1000),
-                    "provider": "lbs",
-                    "isFromMock": False,
-                    "isGpsEnabled": True,
-                    "isWifiEnabled": True,
-                    "isMobileEnabled": False,
-                    "isOffset": True,
-                    "cityAdCode": "023",
-                    "districtAdCode": "500109",
-                    "isArea": True,
-                    "tip": "当前在签到范围内"
-                }
-            }
-            response = request_with_retry("POST", url, headers=headers, params=params, data=json.dumps(payload), timeout=timeout, session=session)
-            return response.json()["data"]
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            token = get_token(
+                username,
+                password,
+                timeout,
+                session=session,
+                force_login=force_login,
+                deadline=deadline,
+            )
+        except Exception as exc:
+            reason = getattr(exc, "reason", "unknown")
+            status = LOGIN_REASON_STATUS.get(reason, 11 if isinstance(exc, TokenInvalidError) else 10)
+            logger.error("登录失败（%s）: %s", STATUS_MESSAGES.get(status, "未知原因"), exc)
+            return status
+
+        try:
+            if vacation_enable(token, timeout, session=session, deadline=deadline):
+                return 5
+            transition_today = get_transition_today(token, timeout, session=session, deadline=deadline)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
+            logger.error("学校接口连接失败或超时: %s", exc)
             return 4
-        except (KeyError, IndexError, TypeError, ValueError) as e:
-            logger.error(f"提交签到时接口返回结构异常: {e}")
+        except TokenInvalidError:
+            return 11
+        except (SwuRequestError, SwuBusinessError) as exc:
+            logger.error("学校接口失败: %s", exc)
             return 10
-        except Exception as e:
-            logger.error(f"提交签到异常: {e}")
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.error("学校接口返回结构异常: %s", exc)
+            return 10
+        except Exception as exc:
+            logger.error("学校接口请求异常: %s", exc)
             return 10
 
-    try:
-        token = get_token(username, password, timeout, session=session, force_login=force_login)
-    except Exception as e:
-        reason = getattr(e, "reason", "unknown")
-        status = LOGIN_REASON_STATUS.get(reason, 11 if "token" in str(e).lower() else 10)
-        logger.error(f"登录失败（{STATUS_MESSAGES.get(status, '未知原因')}）: {e}")
-        return status
-
-    try:
-        if vacation_enable(token, timeout, session=session):
-            return 5
-        transition_today = get_transition_today(token, timeout, session=session)
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-        logger.error(f"学校接口连接失败或超时: {e}")
-        return 4
-    except (KeyError, IndexError, TypeError, ValueError) as e:
-        logger.error(f"学校接口返回结构异常: {e}")
-        return 10
-    except Exception as e:
-        logger.error(f"学校接口请求异常: {e}")
-        return 10
-
-    if not transition_today:
-        return 0
-    if transition_today["qdzt"] == "已签到":
-        return 2
-    post_result = checkin_post(token, timeout, session=session, transition_today=transition_today)
-    if post_result in (4, 10):
-        return post_result
-    return 1
+        if not transition_today:
+            return 0
+        if transition_today.get("qdzt") == "已签到":
+            return 2
+        try:
+            return checkin_post(token, timeout, session=session, transition_today=transition_today, deadline=deadline)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
+            logger.error("签到连接失败或超时: %s", exc)
+            return 4
+        except TokenInvalidError:
+            return 11
+        except (SwuRequestError, SwuBusinessError, KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.error("签到业务失败: %s", exc)
+            return 10
+        except Exception as exc:
+            logger.error("签到执行异常: %s", exc)
+            return 10
+    finally:
+        session.close()
 
 
 def validate_accounts(accounts):
@@ -220,6 +417,7 @@ def validate_accounts(accounts):
         raise ValueError("账号配置必须是 JSON 数组格式（List）")
     
     validated = []
+    seen_usernames = set()
     for idx, acc in enumerate(accounts, 1):
         if not isinstance(acc, dict):
             raise ValueError(f"第 {idx} 个账号配置格式错误：应为 JSON 对象（键值对）")
@@ -236,13 +434,19 @@ def validate_accounts(accounts):
             raise ValueError(f"第 {idx} 个账号配置类型错误：'password' 必须是字符串或数字类型")
             
         username_str = str(username).strip()
-        password_str = str(password).strip()
+        # User passwords are opaque values; leading/trailing spaces may be intentional.
+        password_str = str(password)
         
         if not username_str:
             raise ValueError(f"第 {idx} 个账号配置错误：'username' 不能为空")
-        if not password_str:
+        if password_str == "":
             raise ValueError(f"第 {idx} 个账号配置错误：'password' 不能为空")
-            
+
+        if username_str in seen_usernames:
+            logger.warning("第 %s 个账号与前面的账号重复，已忽略重复配置。", idx)
+            continue
+        seen_usernames.add(username_str)
+
         validated.append({"username": username_str, "password": password_str})
         
     return validated
@@ -322,7 +526,7 @@ def run_config_check(cli_username=None, cli_password=None):
 
     if not accounts:
         user = os.getenv("SWU_USERNAME", "").strip()
-        pwd = os.getenv("SWU_PASSWORD", "").strip()
+        pwd = os.getenv("SWU_PASSWORD", "")
         if user or pwd:
             try:
                 accounts = validate_accounts([{"username": user, "password": pwd}])
@@ -368,25 +572,13 @@ def run_config_check(cli_username=None, cli_password=None):
     else:
         print(f"[OK] 学校官网代理：{proxy_description}")
 
-    login_method = os.getenv("SWU_LOGIN_METHOD", "browser").strip().lower() or "browser"
-    if login_method not in {"auto", "direct", "browser"}:
-        print(f"[WARN] 登录方式：SWU_LOGIN_METHOD={login_method} 无效，将按 browser 处理")
-    else:
-        method_hint = {
-            "auto": "先尝试历史纯 HTTP 登录，失败后回退浏览器登录",
-            "direct": "只使用历史纯 HTTP 登录；该接口可能已不可用，主要用于诊断",
-            "browser": "只使用浏览器登录",
-        }[login_method]
-        print(f"[OK] 登录方式：{login_method}（{method_hint}）")
-
     if REQUESTS_IMPORT_ERROR is None:
         connectivity_ok, connectivity_msg = check_school_connectivity(timeout=5)
         if connectivity_ok:
             print(f"[OK] 学校官网连通性：{connectivity_msg}")
         else:
             print(f"[WARN] 学校官网连通性：{connectivity_msg}")
-            if proxy_description == "未配置":
-                print("       如果服务器在海外，通常需要让服务器已有的 HTTPS_PROXY/ALL_PROXY 指向中国大陆代理出口，或在菜单中配置 SWU_PROXY_URL。")
+            print("       这是预检查提示，不会阻止后续实际登录；实际接口错误会按失败处理。")
 
     deps = [
         ("requests", "requests"),
@@ -405,10 +597,16 @@ def run_config_check(cli_username=None, cli_password=None):
             print(f"[FAIL] 依赖：{label} 未安装或不可用 ({err})")
 
     max_workers_env = os.getenv("SWU_MAX_WORKERS", "").strip()
-    if max_workers_env and not max_workers_env.isdigit():
+    try:
+        configured_workers = int(max_workers_env) if max_workers_env else 3
+    except ValueError:
+        configured_workers = 3
+    if configured_workers < 1:
+        print(f"[WARN] 并发配置：SWU_MAX_WORKERS={max_workers_env} 不是正整数，将使用默认值 3")
+    elif max_workers_env and not max_workers_env.isdigit():
         print(f"[WARN] 并发配置：SWU_MAX_WORKERS={max_workers_env} 不是正整数，将使用默认值 3")
     else:
-        print(f"[OK] 并发配置：最大线程数 {max_workers_env or '3'}")
+        print(f"[OK] 并发配置：最大线程数 {configured_workers}")
 
     if errors:
         print("\n需要处理的问题：")
@@ -443,14 +641,31 @@ def load_users_file():
 def save_users_file(accounts):
     accounts = validate_accounts(accounts)
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(users_config_path(), "w", encoding="utf-8") as f:
-        json.dump(accounts, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    _atomic_write_text(
+        users_config_path(),
+        json.dumps(accounts, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+_ENV_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def _dotenv_quote(value):
+    """Encode a value so python-dotenv reads it back literally."""
+    value = str(value)
+    if "\r" in value or "\n" in value:
+        raise ValueError(".env 值不能包含换行符")
+    # python-dotenv's single-quoted parser decodes these two escapes.
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
 
 
 def set_env_value(key, value):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    os.environ[key] = value
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key)):
+        raise ValueError(f"无效的环境变量名称：{key!r}")
+    key = str(key)
+    value = str(value)
+    encoded_value = _dotenv_quote(value)
     path = env_config_path()
     lines = []
     found = False
@@ -461,8 +676,9 @@ def set_env_value(key, value):
     updated = []
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith(f"{key}="):
-            updated.append(f"{key}={value}")
+        match = _ENV_ASSIGNMENT_RE.match(line)
+        if match and match.group(1) == key:
+            updated.append(f"{key}={encoded_value}")
             found = True
         else:
             updated.append(line)
@@ -470,10 +686,10 @@ def set_env_value(key, value):
     if not found:
         if updated and updated[-1].strip():
             updated.append("")
-        updated.append(f"{key}={value}")
+        updated.append(f"{key}={encoded_value}")
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(updated).rstrip() + "\n")
+    _atomic_write_text(path, "\n".join(updated).rstrip("\n") + "\n")
+    os.environ[key] = value
 
 
 def unset_env_value(*keys):
@@ -489,15 +705,12 @@ def unset_env_value(*keys):
     key_set = set(keys)
     updated = []
     for line in lines:
-        stripped = line.strip()
-        if "=" in stripped and not stripped.startswith("#"):
-            name = stripped.split("=", 1)[0].strip()
-            if name in key_set:
-                continue
+        match = _ENV_ASSIGNMENT_RE.match(line)
+        if match and match.group(1) in key_set:
+            continue
         updated.append(line)
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(updated).rstrip() + "\n")
+    _atomic_write_text(path, "\n".join(updated).rstrip("\n") + "\n")
 
 
 def prompt_non_empty(label):
@@ -511,8 +724,8 @@ def prompt_non_empty(label):
 def prompt_password(label="请输入密码："):
     import getpass
     while True:
-        value = getpass.getpass(label).strip()
-        if value:
+        value = getpass.getpass(label)
+        if value != "":
             return value
         print("密码不能为空，请重新输入。")
 
@@ -790,50 +1003,114 @@ def run_menu():
             return 0
 
 
+_RUN_LOCK_FD = None
+_RUN_LOCK_STYLE = None
+
+
 def acquire_run_lock():
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    lock_path = os.path.join(CONFIG_DIR, ".run.lock")
-    stale_seconds = 7200
-    stale_env = os.getenv("SWU_LOCK_STALE_SECONDS", "").strip()
-    if stale_env.isdigit():
-        stale_seconds = int(stale_env)
-
-    if os.path.exists(lock_path):
-        age = time.time() - os.path.getmtime(lock_path)
-        if age < stale_seconds:
-            logger.warning(f"检测到已有任务正在运行，跳过本次执行。锁文件：{lock_path}")
-            return None
-        logger.warning(f"检测到过期锁文件，已清理：{lock_path}")
-        try:
-            os.remove(lock_path)
-        except FileNotFoundError:
-            pass
-
+    """Acquire an OS lock; never infer liveness from a file age."""
+    global _RUN_LOCK_FD, _RUN_LOCK_STYLE
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        logger.warning(f"检测到已有任务正在运行，跳过本次执行。锁文件：{lock_path}")
-        return None
+        os.chmod(CONFIG_DIR, 0o700)
+    except OSError:
+        pass
+    lock_path = os.path.join(CONFIG_DIR, ".run.lock")
+    open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    fd = os.open(lock_path, open_flags, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                os.close(fd)
+                logger.warning("检测到已有任务正在运行，跳过本次执行。锁文件：%s", lock_path)
+                return None
+            _RUN_LOCK_STYLE = "msvcrt"
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if getattr(exc, "errno", None) not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                os.close(fd)
+                logger.warning("检测到已有任务正在运行，跳过本次执行。锁文件：%s", lock_path)
+                return None
+            _RUN_LOCK_STYLE = "fcntl"
 
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "pid": os.getpid(),
-            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }, ensure_ascii=False))
-        f.write("\n")
-
-    return lock_path
+        metadata = json.dumps(
+            {"pid": os.getpid(), "started_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+            ensure_ascii=False,
+        ) + "\n"
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            try:
+                fchmod(fd, 0o600)
+            except (AttributeError, NotImplementedError, OSError):
+                os.chmod(lock_path, 0o600)
+        else:
+            os.chmod(lock_path, 0o600)
+        os.ftruncate(fd, 0)
+        os.write(fd, metadata.encode("utf-8"))
+        os.fsync(fd)
+        _RUN_LOCK_FD = fd
+        return lock_path
+    except Exception:
+        with contextlib.suppress(Exception):
+            if _RUN_LOCK_STYLE == "msvcrt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            elif _RUN_LOCK_STYLE == "fcntl":
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        _RUN_LOCK_STYLE = None
+        raise
 
 
 def release_run_lock(lock_path):
-    if not lock_path:
+    global _RUN_LOCK_FD, _RUN_LOCK_STYLE
+    if _RUN_LOCK_FD is None:
         return
     try:
-        os.remove(lock_path)
-    except FileNotFoundError:
-        pass
+        if _RUN_LOCK_STYLE == "msvcrt":
+            import msvcrt
+            os.lseek(_RUN_LOCK_FD, 0, os.SEEK_SET)
+            msvcrt.locking(_RUN_LOCK_FD, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_RUN_LOCK_FD, fcntl.LOCK_UN)
     except Exception as exc:
-        logger.warning(f"清理运行锁失败：{exc}")
+        logger.warning("释放运行锁失败：%s", exc)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(_RUN_LOCK_FD)
+        _RUN_LOCK_FD = None
+        _RUN_LOCK_STYLE = None
+
+
+def run_accounts(accounts, force_login=False, checkin_func=None, sleep_func=time.sleep, clock=time.monotonic):
+    from runner import run_accounts as _run_accounts
+    return _run_accounts(
+        accounts,
+        force_login=force_login,
+        checkin_func=checkin_func or check_in,
+        validate_accounts=validate_accounts,
+        status_messages=STATUS_MESSAGES,
+        retryable_statuses=RETRYABLE_STATUSES,
+        terminal_success_statuses=TERMINAL_SUCCESS_STATUSES,
+        deadline_exception=DeadlineExceeded,
+        sleep_func=sleep_func,
+        clock=clock,
+        logger=logger,
+    )
 
 
 if __name__ == "__main__":
@@ -869,20 +1146,18 @@ if __name__ == "__main__":
 
     connectivity_ok, connectivity_msg = check_school_connectivity(timeout=5)
     if connectivity_ok:
-        logger.info(f"学校官网连通性检查通过：{connectivity_msg}")
+        logger.info(f"学校官网连通性预检查通过：{connectivity_msg}")
     else:
-        logger.warning(f"学校官网连通性检查失败：{connectivity_msg}")
-        if has_school_proxy_config():
-            logger.warning("已检测到代理配置，请检查代理出口是否位于中国大陆内、代理地址是否可达、认证信息是否正确。")
-        else:
-            logger.error("当前没有可用的学校官网代理配置，且直连学校官网失败。")
-            logger.error("如果服务器在海外且服务端也不提供任何中国大陆出口、代理或隧道，脚本无法凭空访问学校官网。")
-            logger.error("请换用中国大陆内服务器运行，或提供一个可信的中国大陆网络出口。")
-            raise SystemExit(1)
+        logger.warning(f"学校官网连通性预检查失败：{connectivity_msg}")
+        logger.warning("预检查不会阻止实际登录；实际 HTTP 或业务错误仍会按失败处理。")
 
     run_lock_path = None
     if not args.no_lock:
-        run_lock_path = acquire_run_lock()
+        try:
+            run_lock_path = acquire_run_lock()
+        except Exception as exc:
+            logger.error("无法建立跨进程运行锁，停止执行以避免重复签到：%s", exc)
+            raise SystemExit(1)
         if run_lock_path is None:
             raise SystemExit(0)
         atexit.register(release_run_lock, run_lock_path)
@@ -943,7 +1218,7 @@ if __name__ == "__main__":
     # 3. 回退到单账号环境变量 SWU_USERNAME / SWU_PASSWORD
     if not accounts:
         user = os.getenv("SWU_USERNAME", "").strip()
-        pwd = os.getenv("SWU_PASSWORD", "").strip()
+        pwd = os.getenv("SWU_PASSWORD", "")
         if user or pwd:
             try:
                 raw_accounts = [{"username": user, "password": pwd}]
@@ -968,8 +1243,8 @@ if __name__ == "__main__":
                         if not uname:
                             print("账号不能为空，请重新输入。")
                             continue
-                        pwd = getpass.getpass("请输入密码（输入已隐藏，直接回车即可）: ").strip()
-                        if not pwd:
+                        pwd = getpass.getpass("请输入密码（输入已隐藏，直接回车即可）: ")
+                        if pwd == "":
                             print("密码不能为空，请重新输入。")
                             continue
                         new_accounts.append({"username": uname, "password": pwd})
@@ -979,9 +1254,10 @@ if __name__ == "__main__":
                     
                     config_path = users_config_path()
                     try:
-                        os.makedirs(CONFIG_DIR, exist_ok=True)
-                        with open(config_path, "w", encoding="utf-8") as f:
-                            json.dump(new_accounts, f, ensure_ascii=False, indent=2)
+                        _atomic_write_text(
+                            config_path,
+                            json.dumps(new_accounts, ensure_ascii=False, indent=2) + "\n",
+                        )
                         logger.info(f"配置成功！已生成 users.json，共配置 {len(new_accounts)} 个账号。")
                         accounts = validate_accounts(new_accounts)
                     except Exception as ex:
@@ -995,104 +1271,11 @@ if __name__ == "__main__":
         logger.error("未配置账号信息！请提供以下之一：\n  1. 同目录下创建 users.json\n  2. 设置环境变量 SWU_USERS (JSON 格式)\n  3. 设置环境变量 SWU_USERNAME 和 SWU_PASSWORD")
         raise SystemExit(1)
         
-    message_map = STATUS_MESSAGES
-    
-    def run_account_checkin(idx, acc, total_accounts):
-        username = acc["username"]
-        password = acc["password"]
-
-        logger.info(f"[{idx}/{total_accounts}] 开始为账号 {username} 执行签到...")
-        try:
-            result = check_in(username, password, force_login=args.force_login)
-            msg = message_map.get(result, '未知状态')
-            logger.info(f"[{idx}/{total_accounts}] 账号 {username} 签到结果: {msg}")
-            return idx, username, result, None
-        except Exception as e:
-            logger.error(f"[{idx}/{total_accounts}] 账号 {username} 签到执行异常: {e}")
-            return idx, username, -2, str(e)
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    max_workers_env = os.getenv("SWU_MAX_WORKERS", "").strip()
-    max_workers = 3
-    if max_workers_env.isdigit():
-        max_workers = int(max_workers_env)
-
-    retry_interval_env = os.getenv("SWU_RETRY_INTERVAL_SECONDS", "").strip()
-    retry_interval_seconds = 300
-    if retry_interval_env.isdigit():
-        retry_interval_seconds = max(1, int(retry_interval_env))
-
-    logger.info(f"并发执行：最大线程数 = {max_workers}")
-    logger.info(f"失败账号重试：间隔 {retry_interval_seconds} 秒，直到所有账号完成打卡。")
-
-    final_results = {}
-    pending_accounts = list(accounts)
-    attempt = 1
-
-    def run_checkin_batch(batch_accounts, attempt_no):
-        batch_failed = []
-        total_batch = len(batch_accounts)
-        logger.info(f"开始第 {attempt_no} 轮打卡，本轮账号数：{total_batch}")
-        futures = {}
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for idx, acc in enumerate(batch_accounts, 1):
-                future = executor.submit(run_account_checkin, idx, acc, total_batch)
-                futures[future] = acc
-
-            for future in as_completed(futures):
-                acc = futures[future]
-                username = acc.get("username", "").strip()
-                try:
-                    idx, user, result, err = future.result()
-                    if err is not None:
-                        status_msg = f"执行异常: {err}"
-                        is_ok = False
-                    else:
-                        status_msg = message_map.get(result, "未知状态")
-                        is_ok = (result in [0, 1, 2, 5])
-                except Exception as e:
-                    logger.error(f"线程执行异常 ({username}): {e}")
-                    user = username
-                    status_msg = f"线程执行异常: {e}"
-                    is_ok = False
-
-                final_results[user] = (status_msg, is_ok, attempt_no)
-                if not is_ok:
-                    batch_failed.append(acc)
-
-        completed_count = len(accounts) - len(batch_failed)
-        logger.info(f"第 {attempt_no} 轮打卡完成：累计完成 {completed_count}/{len(accounts)}，本轮失败 {len(batch_failed)} 个。")
-        return batch_failed
-
-    while pending_accounts:
-        pending_accounts = run_checkin_batch(pending_accounts, attempt)
-        if pending_accounts:
-            failed_users = ", ".join(acc.get("username", "").strip() for acc in pending_accounts)
-            logger.warning(f"仍有 {len(pending_accounts)} 个账号未完成：{failed_users}")
-            logger.warning(f"将在 {retry_interval_seconds} 秒后仅重试未完成账号。")
-            time.sleep(retry_interval_seconds)
-            attempt += 1
-
-    success_count = sum(1 for _, is_ok, _ in final_results.values() if is_ok)
-    failed_count = len(accounts) - success_count
-
     summary_title = "西南大学自动签到任务通知"
-    summary_content = f"打卡执行完毕！成功: {success_count} 个，失败: {failed_count} 个。"
-    if attempt > 1:
-        summary_content += f"\n总轮次: {attempt} 轮。"
-    summary_content += "\n\n打卡详情:"
-
-    for user in sorted(final_results):
-        status, is_ok, done_attempt = final_results[user]
-        icon = "✅" if is_ok else "❌"
-        retry_note = f"（第 {done_attempt} 轮完成）" if done_attempt > 1 else ""
-        summary_content += f"\n{icon} 账号 {user}: {status}{retry_note}"
-
-    logger.info(f"\n{summary_content}")
-
+    summary_content, exit_code, _ = run_accounts(accounts, force_login=args.force_login)
     try:
         from notify import send_push
         send_push(summary_title, summary_content)
-    except Exception as e:
-        logger.error(f"发送消息推送异常: {e}")
+    except Exception as exc:
+        logger.error("发送消息推送异常: %s", exc)
+    raise SystemExit(exit_code)

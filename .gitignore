@@ -1,4 +1,14 @@
 __pycache__/
-*.pyc
-.token_cache.json
+*.py[cod]
+.env
 users.json
+.token_cache.json
+.run.lock
+*.run.lock
+.runlock
+run.lock
+data/
+logs/
+debug/
+*.log
+.swu-write-*
