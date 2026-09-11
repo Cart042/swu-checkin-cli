@@ -52,12 +52,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Install Chromium for browser login
-        run: playwright install chromium
+      - name: Install Chromium headless shell for browser login
+        run: python -m playwright install --with-deps --only-shell chromium
 
       - name: Check local configuration
         run: python check_in.py --check-config

@@ -9,14 +9,17 @@ import urllib.parse
 
 import requests
 
+import config
+
 
 logger = logging.getLogger("swu.notify")
 
 REQUEST_TIMEOUT_SECONDS = 10
-DEFAULT_PUSH_DEADLINE_SECONDS = 60
-MIN_PUSH_DEADLINE_SECONDS = 1
-MAX_PUSH_DEADLINE_SECONDS = 3600
-PUSH_DEADLINE_ENV = "SWU_PUSH_DEADLINE_SECONDS"
+_PUSH_DEADLINE_SPEC = config.RUNTIME_PARAMETER_BY_KEY["push_deadline_seconds"]
+DEFAULT_PUSH_DEADLINE_SECONDS = _PUSH_DEADLINE_SPEC.default
+MIN_PUSH_DEADLINE_SECONDS = _PUSH_DEADLINE_SPEC.minimum
+MAX_PUSH_DEADLINE_SECONDS = _PUSH_DEADLINE_SPEC.maximum
+PUSH_DEADLINE_ENV = _PUSH_DEADLINE_SPEC.env_name
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 TELEGRAM_MAX_RETRIES = 2
 TELEGRAM_MAX_RETRY_AFTER_SECONDS = 30
@@ -104,28 +107,9 @@ def _request_timeout(deadline=None, clock=None):
 
 
 def _configured_push_deadline_seconds(logger_=None):
-    """Read a bounded push budget, falling back to the safe default."""
-    raw = os.getenv(PUSH_DEADLINE_ENV, "").strip()
-    if not raw:
-        return DEFAULT_PUSH_DEADLINE_SECONDS
+    """Read the shared bounded push budget from the central parser."""
 
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = None
-
-    if value is None or not MIN_PUSH_DEADLINE_SECONDS <= value <= MAX_PUSH_DEADLINE_SECONDS:
-        if logger_ is not None:
-            logger_.warning(
-                "%s=%s 无效（允许 %s-%s 秒），使用默认推送总预算 %s 秒。",
-                PUSH_DEADLINE_ENV,
-                raw,
-                MIN_PUSH_DEADLINE_SECONDS,
-                MAX_PUSH_DEADLINE_SECONDS,
-                DEFAULT_PUSH_DEADLINE_SECONDS,
-            )
-        return DEFAULT_PUSH_DEADLINE_SECONDS
-    return value
+    return config.parse_runtime_options(logger=logger_).push_deadline_seconds
 
 
 def _call_with_session(session, operation, channel_name, *, deadline=None, clock=None):
@@ -433,6 +417,27 @@ def _env_value(name):
     return os.getenv(name, "").strip()
 
 
+_PUSH_SENDERS = {
+    "DingTalk": send_dingtalk,
+    "WeChat Work": send_qywx,
+    "Bark": send_bark,
+    "ServerChan": send_serverchan,
+    "PushDeer": send_pushdeer,
+    "Telegram": send_telegram,
+}
+
+
+def _channel_arguments(channel, title, content):
+    """Build sender arguments from one shared channel registration row."""
+
+    env_names = channel.required_env + channel.optional_env
+    values = tuple(_env_value(name) for name in env_names)
+    # Every sender takes its table values followed by the common title/body.
+    # This keeps registration data in config.py and avoids another credential
+    # list in this module.
+    return values + (title, content)
+
+
 def send_push(title, content, session=None, *, clock=None, sleep_func=None):
     """Send through every configured channel and return whether one succeeded."""
     effective_clock = _effective_clock(clock)
@@ -440,46 +445,36 @@ def send_push(title, content, session=None, *, clock=None, sleep_func=None):
     push_deadline = effective_clock() + _configured_push_deadline_seconds(logger)
     deadline = float(push_deadline)
 
-    dingtalk_token = _env_value("PUSH_DINGTALK_TOKEN")
-    dingtalk_secret = _env_value("PUSH_DINGTALK_SECRET")
-    qywx_key = _env_value("PUSH_QYWX_KEY")
-    bark_key = _env_value("PUSH_BARK_KEY")
-    bark_url = _env_value("PUSH_BARK_URL")
-    serverchan_key = _env_value("PUSH_SERVERCHAN_KEY")
-    pushdeer_key = _env_value("PUSH_PUSHDEER_KEY")
-    telegram_token = _env_value("PUSH_TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = _env_value("PUSH_TELEGRAM_CHAT_ID")
-
     channels = []
-    if dingtalk_token:
+    for channel in config.PUSH_CHANNELS:
+        present = [_env_value(name) for name in channel.required_env]
+        if not any(present):
+            continue
+        if not all(present):
+            if channel.name == "Telegram":
+                logger.warning(
+                    "Telegram 推送配置不完整：需同时设置 "
+                    "PUSH_TELEGRAM_BOT_TOKEN 和 PUSH_TELEGRAM_CHAT_ID，跳过请求。"
+                )
+            else:
+                missing = [
+                    name for name, value in zip(channel.required_env, present) if not value
+                ]
+                logger.warning(
+                    "%s 推送配置不完整，缺少 %s，跳过请求。",
+                    channel.menu_label,
+                    ", ".join(missing),
+                )
+            continue
+        sender = _PUSH_SENDERS.get(channel.name)
+        if sender is None:
+            logger.warning("未找到%s推送实现，跳过请求。", channel.menu_label)
+            continue
         channels.append((
-            "钉钉机器人",
-            send_dingtalk,
-            (dingtalk_token, dingtalk_secret, title, content),
+            channel.menu_label,
+            sender,
+            _channel_arguments(channel, title, content),
         ))
-    if qywx_key:
-        channels.append(("企业微信群机器人", send_qywx, (qywx_key, title, content)))
-    if bark_key:
-        channels.append(("Bark", send_bark, (bark_key, bark_url, title, content)))
-    if serverchan_key:
-        channels.append(("Server酱", send_serverchan, (serverchan_key, title, content)))
-    if pushdeer_key:
-        channels.append(("PushDeer", send_pushdeer, (pushdeer_key, title, content)))
-
-    if telegram_token or telegram_chat_id:
-        if telegram_token and telegram_chat_id:
-            # Keep chat IDs as strings: this preserves negative group IDs and
-            # usernames such as @example_group exactly as configured.
-            channels.append((
-                "Telegram",
-                send_telegram,
-                (telegram_token, telegram_chat_id, title, content),
-            ))
-        else:
-            logger.warning(
-                "Telegram 推送配置不完整：需同时设置 "
-                "PUSH_TELEGRAM_BOT_TOKEN 和 PUSH_TELEGRAM_CHAT_ID，跳过请求。"
-            )
 
     if not channels:
         logger.info(

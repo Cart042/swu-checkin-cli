@@ -1,5 +1,5 @@
-# Direct runtime dependencies verified in the offline CI environment (Python 3.12)
-# and compatible with the Python 3.11 workflows/Docker image.
+# Direct runtime dependencies used by the check-in runtime and the CI smoke
+# test (Python 3.11 workflows/Docker image and Python 3.12 local verification).
 requests==2.34.2
 playwright==1.62.0
 ddddocr==1.6.1

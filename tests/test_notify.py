@@ -151,6 +151,37 @@ class NotifyOfflineTests(unittest.TestCase):
         self.assertIn("oapi.dingtalk.com", session.calls[0][1])
         self.assertIn("Telegram推送失败", "\n".join(logs.output))
 
+    def test_send_push_uses_shared_channel_registration_for_all_channels(self):
+        session = FakeSession([
+            FakeResponse(200, {"errcode": 0}),
+            FakeResponse(200, {"errcode": 0}),
+            FakeResponse(200),
+            FakeResponse(200, {"code": 0}),
+            FakeResponse(200, {"code": 0}),
+            FakeResponse(200, {"ok": True}),
+        ])
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PUSH_DINGTALK_TOKEN": "ding-token",
+                "PUSH_DINGTALK_SECRET": "",
+                "PUSH_QYWX_KEY": "qywx-key",
+                "PUSH_BARK_KEY": "bark-key",
+                "PUSH_BARK_URL": "https://bark.invalid",
+                "PUSH_SERVERCHAN_KEY": "server-key",
+                "PUSH_PUSHDEER_KEY": "deer-key",
+                "PUSH_TELEGRAM_BOT_TOKEN": "telegram-token",
+                "PUSH_TELEGRAM_CHAT_ID": "chat",
+            },
+        ):
+            self.assertTrue(notify.send_push("title", "body", session=session))
+
+        self.assertEqual(len(session.calls), len(notify.config.PUSH_CHANNELS))
+        self.assertEqual(
+            [method for method, _url, _kwargs in session.calls],
+            ["POST", "POST", "GET", "POST", "POST", "POST"],
+        )
+
     def test_send_push_closes_shared_session_and_returns_status(self):
         session = FakeSession([FakeResponse(200, {"ok": True})])
         with mock.patch.object(notify.requests, "Session", return_value=session) as session_factory, mock.patch.dict(

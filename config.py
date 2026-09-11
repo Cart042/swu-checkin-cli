@@ -12,9 +12,10 @@ import json
 import logging
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from typing import Mapping
+
+from atomic_io import atomic_write_text
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +24,120 @@ CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
 logger = logging.getLogger("swu.config")
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+@dataclass(frozen=True)
+class RuntimeParameterSpec:
+    """Definition for one bounded runtime setting.
+
+    Keeping the environment name, range, and default together prevents the
+    runtime and the offline configuration report from drifting apart.
+    """
+
+    key: str
+    env_name: str
+    default: int
+    minimum: int
+    maximum: int
+    label: str
+
+
+@dataclass(frozen=True)
+class RuntimeOptions:
+    """Effective values for all bounded runtime settings."""
+
+    max_workers: int
+    max_rounds: int
+    retry_interval_seconds: int
+    run_deadline_seconds: int
+    push_deadline_seconds: int
+
+
+@dataclass(frozen=True)
+class RuntimeParameterIssue:
+    """A malformed runtime value and the setting it belongs to."""
+
+    spec: RuntimeParameterSpec
+    raw_value: str
+
+
+RUNTIME_PARAMETER_SPECS = (
+    RuntimeParameterSpec(
+        "max_workers",
+        "SWU_MAX_WORKERS",
+        default=3,
+        minimum=1,
+        maximum=32,
+        label="最大线程数",
+    ),
+    RuntimeParameterSpec(
+        "max_rounds",
+        "SWU_MAX_ROUNDS",
+        default=3,
+        minimum=1,
+        maximum=20,
+        label="失败账号最多重试轮数",
+    ),
+    RuntimeParameterSpec(
+        "retry_interval_seconds",
+        "SWU_RETRY_INTERVAL_SECONDS",
+        default=300,
+        minimum=1,
+        maximum=3600,
+        label="失败账号重试间隔（秒）",
+    ),
+    RuntimeParameterSpec(
+        "run_deadline_seconds",
+        "SWU_RUN_DEADLINE_SECONDS",
+        default=900,
+        minimum=1,
+        maximum=3600,
+        label="单次任务总时限（秒）",
+    ),
+    RuntimeParameterSpec(
+        "push_deadline_seconds",
+        "SWU_PUSH_DEADLINE_SECONDS",
+        default=60,
+        minimum=1,
+        maximum=3600,
+        label="推送共享总预算（秒）",
+    ),
+)
+RUNTIME_PARAMETER_BY_KEY = {spec.key: spec for spec in RUNTIME_PARAMETER_SPECS}
+
+
+@dataclass(frozen=True)
+class PushChannelSpec:
+    """Small shared registration row for one push channel."""
+
+    name: str
+    menu_label: str
+    required_env: tuple[str, ...]
+    optional_env: tuple[str, ...] = ()
+
+
+PUSH_CHANNELS = (
+    PushChannelSpec(
+        "DingTalk",
+        "钉钉机器人",
+        ("PUSH_DINGTALK_TOKEN",),
+        ("PUSH_DINGTALK_SECRET",),
+    ),
+    PushChannelSpec("WeChat Work", "企业微信群机器人", ("PUSH_QYWX_KEY",)),
+    PushChannelSpec(
+        "Bark",
+        "Bark",
+        ("PUSH_BARK_KEY",),
+        ("PUSH_BARK_URL",),
+    ),
+    PushChannelSpec("ServerChan", "Server 酱", ("PUSH_SERVERCHAN_KEY",)),
+    PushChannelSpec("PushDeer", "PushDeer", ("PUSH_PUSHDEER_KEY",)),
+    PushChannelSpec(
+        "Telegram",
+        "Telegram",
+        ("PUSH_TELEGRAM_BOT_TOKEN", "PUSH_TELEGRAM_CHAT_ID"),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +172,69 @@ def env_config_path(config_dir: str | os.PathLike[str] | None = None) -> str:
     return os.path.join(get_config_dir(config_dir), ".env")
 
 
+def _read_runtime_options(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[RuntimeOptions, tuple[RuntimeParameterIssue, ...]]:
+    """Parse all bounded runtime values from one environment mapping."""
+
+    env = os.environ if environ is None else environ
+    values: dict[str, int] = {}
+    issues: list[RuntimeParameterIssue] = []
+    for spec in RUNTIME_PARAMETER_SPECS:
+        raw = env.get(spec.env_name, "")
+        raw_text = "" if raw is None else str(raw).strip()
+        value = spec.default
+        if raw_text:
+            try:
+                candidate = int(raw_text, 10)
+            except (TypeError, ValueError):
+                issues.append(RuntimeParameterIssue(spec, raw_text))
+            else:
+                if spec.minimum <= candidate <= spec.maximum:
+                    value = candidate
+                else:
+                    issues.append(RuntimeParameterIssue(spec, raw_text))
+        values[spec.key] = value
+    return RuntimeOptions(**values), tuple(issues)
+
+
+def parse_runtime_options(
+    environ: Mapping[str, str] | None = None,
+    *,
+    logger=None,
+) -> RuntimeOptions:
+    """Return effective runtime settings using one bounded parser.
+
+    Invalid non-empty values fall back to the per-setting default.  The
+    optional logger is used by actual runs; callers such as ``--check-config``
+    can inspect :func:`runtime_parameter_issues` to render the same result
+    without logging.
+    """
+
+    options, issues = _read_runtime_options(environ)
+    if logger is not None:
+        for issue in issues:
+            spec = issue.spec
+            logger.warning(
+                "%s=%s 无效（允许 %s-%s），将使用默认值 %s。",
+                spec.env_name,
+                issue.raw_value,
+                spec.minimum,
+                spec.maximum,
+                spec.default,
+            )
+    return options
+
+
+def runtime_parameter_issues(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[RuntimeParameterIssue, ...]:
+    """Return malformed runtime values without emitting logs."""
+
+    _options, issues = _read_runtime_options(environ)
+    return issues
+
+
 def load_dotenv_file(config_dir: str | os.PathLike[str] | None = None) -> bool:
     """Load the selected ``.env`` before reading any account source.
 
@@ -82,42 +260,7 @@ def load_dotenv_file(config_dir: str | os.PathLike[str] | None = None) -> bool:
 def _atomic_write_text(path: str, content: str, mode: int = 0o600) -> None:
     """Write a sensitive configuration file without exposing partial data."""
 
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(directory, 0o700)
-    except OSError:
-        pass
-    fd, temporary_path = tempfile.mkstemp(prefix=".swu-write-", dir=directory, text=True)
-    try:
-        fchmod = getattr(os, "fchmod", None)
-        if fchmod is not None:
-            try:
-                fchmod(fd, mode)
-            except (AttributeError, NotImplementedError, OSError):
-                os.chmod(temporary_path, mode)
-        else:
-            os.chmod(temporary_path, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            if hasattr(os, "fsync"):
-                os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        try:
-            os.chmod(path, mode)
-        except OSError:
-            pass
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(temporary_path)
-        except FileNotFoundError:
-            pass
-        raise
+    atomic_write_text(path, content, mode=mode, prefix=".swu-write-")
 
 
 def validate_accounts(accounts) -> list[dict[str, str]]:
@@ -246,38 +389,35 @@ def mask_account(value: str) -> str:
     return f"{value[:2]}***{value[-2:]}"
 
 
+def _env_value_present(environ: Mapping[str, str], name: str) -> bool:
+    value = environ.get(name, "")
+    return value is not None and bool(str(value).strip())
+
+
 def configured_push_channels(environ: Mapping[str, str] | None = None) -> list[str]:
     """List push channels with complete required credentials."""
 
     env = os.environ if environ is None else environ
-    channels: list[str] = []
-    for env_name, channel_name in (
-        ("PUSH_DINGTALK_TOKEN", "DingTalk"),
-        ("PUSH_QYWX_KEY", "WeChat Work"),
-        ("PUSH_BARK_KEY", "Bark"),
-        ("PUSH_SERVERCHAN_KEY", "ServerChan"),
-        ("PUSH_PUSHDEER_KEY", "PushDeer"),
-    ):
-        if str(env.get(env_name, "")).strip():
-            channels.append(channel_name)
-    if str(env.get("PUSH_TELEGRAM_BOT_TOKEN", "")).strip() and str(
-        env.get("PUSH_TELEGRAM_CHAT_ID", "")
-    ).strip():
-        channels.append("Telegram")
-    return channels
+    return [
+        channel.name
+        for channel in PUSH_CHANNELS
+        if all(_env_value_present(env, name) for name in channel.required_env)
+    ]
 
 
 def push_configuration_errors(environ: Mapping[str, str] | None = None) -> list[str]:
     """Return actionable errors for channels with incomplete settings."""
 
     env = os.environ if environ is None else environ
-    token = str(env.get("PUSH_TELEGRAM_BOT_TOKEN", "")).strip()
-    chat_id = str(env.get("PUSH_TELEGRAM_CHAT_ID", "")).strip()
-    if token and not chat_id:
-        return ["Telegram 推送缺少 PUSH_TELEGRAM_CHAT_ID。"]
-    if chat_id and not token:
-        return ["Telegram 推送缺少 PUSH_TELEGRAM_BOT_TOKEN。"]
-    return []
+    errors: list[str] = []
+    for channel in PUSH_CHANNELS:
+        present = [name for name in channel.required_env if _env_value_present(env, name)]
+        if present and len(present) < len(channel.required_env):
+            missing = [name for name in channel.required_env if name not in present]
+            errors.append(
+                f"{channel.name} 推送缺少 {', '.join(missing)}。"
+            )
+    return errors
 
 
 def _source_error(source: str, exc: Exception) -> str:

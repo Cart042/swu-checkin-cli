@@ -1,30 +1,17 @@
 """Bounded, offline-testable account runner used by the CLI."""
 
 import logging
-import os
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-
-def _positive_int_env(name, default, *, minimum=1, maximum=None, logger=None):
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        if logger:
-            logger.warning("%s=%s 不是正整数，将使用默认值 %s。", name, raw, default)
-        return default
-    if value < minimum or (maximum is not None and value > maximum):
-        if logger:
-            logger.warning("%s=%s 超出允许范围，将使用默认值 %s。", name, raw, default)
-        return default
-    return value
+import config
 
 
-def _configured_max_workers(account_count, logger=None):
-    configured = _positive_int_env("SWU_MAX_WORKERS", 3, maximum=32, logger=logger)
+def _configured_max_workers(account_count, logger=None, *, options=None):
+    """Bound the configured worker count to the number of supplied accounts."""
+
+    runtime_options = options or config.parse_runtime_options(logger=logger)
+    configured = runtime_options.max_workers
     return max(1, min(configured, max(1, account_count)))
 
 
@@ -198,10 +185,15 @@ def run_accounts(
     if not accounts:
         return "没有可执行的账号。", 1, {}
 
-    max_workers = _configured_max_workers(len(accounts), logger)
-    retry_interval = _positive_int_env("SWU_RETRY_INTERVAL_SECONDS", 300, maximum=3600, logger=logger)
-    max_rounds = _positive_int_env("SWU_MAX_ROUNDS", 3, maximum=20, logger=logger)
-    deadline_seconds = _positive_int_env("SWU_RUN_DEADLINE_SECONDS", 900, maximum=3600, logger=logger)
+    runtime_options = config.parse_runtime_options(logger=logger)
+    max_workers = _configured_max_workers(
+        len(accounts),
+        logger,
+        options=runtime_options,
+    )
+    retry_interval = runtime_options.retry_interval_seconds
+    max_rounds = runtime_options.max_rounds
+    deadline_seconds = runtime_options.run_deadline_seconds
     overall_deadline = clock() + deadline_seconds
     pending_accounts = list(accounts)
     final_results = {}

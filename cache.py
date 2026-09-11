@@ -8,8 +8,9 @@ because the cache contains bearer credentials.
 
 import json
 import os
-import tempfile
 import threading
+
+from atomic_io import atomic_write_text
 
 
 _token_cache_lock = threading.Lock()
@@ -35,12 +36,6 @@ def save_cached_token(username, token, cache_path):
         raise ValueError("不能缓存空 Token")
     with _token_cache_lock:
         absolute_path = os.path.abspath(cache_path)
-        directory = os.path.dirname(absolute_path) or "."
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(directory, 0o700)
-        except OSError:
-            pass
 
         cache = {}
         try:
@@ -51,51 +46,12 @@ def save_cached_token(username, token, cache_path):
         except (OSError, ValueError, TypeError):
             pass
         cache[str(username)] = token
-
-        fd, temporary_path = tempfile.mkstemp(prefix=".token-cache-", dir=directory, text=True)
-        try:
-            fchmod = getattr(os, "fchmod", None)
-            if fchmod is not None:
-                try:
-                    fchmod(fd, 0o600)
-                except (AttributeError, NotImplementedError, OSError):
-                    os.chmod(temporary_path, 0o600)
-            else:
-                os.chmod(temporary_path, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(cache, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                if hasattr(os, "fsync"):
-                    os.fsync(handle.fileno())
-            os.replace(temporary_path, absolute_path)
-            try:
-                os.chmod(absolute_path, 0o600)
-            except OSError:
-                pass
-
-            # Persist the directory entry where the platform supports it.  If
-            # the operation is unavailable, the atomic replace still protects
-            # readers from partial JSON.
-            try:
-                directory_fd = os.open(directory, os.O_DIRECTORY)
-            except (AttributeError, OSError):
-                directory_fd = None
-            if directory_fd is not None:
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-            raise
+        atomic_write_text(
+            absolute_path,
+            json.dumps(cache, ensure_ascii=False, indent=2) + "\n",
+            mode=0o600,
+            prefix=".token-cache-",
+        )
 
 
 # Internal aliases make the module pleasant to use from older integrations

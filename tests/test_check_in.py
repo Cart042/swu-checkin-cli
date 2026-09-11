@@ -92,6 +92,58 @@ class CheckInOfflineTests(unittest.TestCase):
             self.assertEqual(check_in.run_network_check(), 0)
         probe.assert_called_once_with(timeout=5)
 
+    def test_config_check_displays_effective_runtime_values(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {
+                "SWU_MAX_WORKERS": "2",
+                "SWU_MAX_ROUNDS": "4",
+                "SWU_RETRY_INTERVAL_SECONDS": "7",
+                "SWU_RUN_DEADLINE_SECONDS": "11",
+                "SWU_PUSH_DEADLINE_SECONDS": "13",
+            },
+            clear=True,
+        ), mock.patch.object(check_in, "check_dependency", return_value=(True, None)), mock.patch(
+            "builtins.print"
+        ) as printer:
+            self.assertEqual(
+                check_in.run_config_check("alice", "password", config_dir=directory),
+                0,
+            )
+
+        output = "\n".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("SWU_MAX_WORKERS=2", output)
+        self.assertIn("SWU_MAX_ROUNDS=4", output)
+        self.assertIn("SWU_RETRY_INTERVAL_SECONDS=7", output)
+        self.assertIn("SWU_RUN_DEADLINE_SECONDS=11", output)
+        self.assertIn("SWU_PUSH_DEADLINE_SECONDS=13", output)
+
+    def test_runner_uses_same_run_deadline_value_as_config_check(self):
+        calls = []
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SWU_MAX_WORKERS": "1",
+                "SWU_MAX_ROUNDS": "1",
+                "SWU_RETRY_INTERVAL_SECONDS": "1",
+                "SWU_RUN_DEADLINE_SECONDS": "11",
+            },
+        ):
+            def fake_checkin(username, password, **kwargs):
+                calls.append(kwargs["deadline"])
+                return 0
+
+            summary, exit_code, _results = check_in.run_accounts(
+                [{"username": "alice", "password": "password"}],
+                checkin_func=fake_checkin,
+                sleep_func=lambda _seconds: None,
+                clock=lambda: 100.0,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("成功: 1 个", summary)
+        self.assertEqual(calls, [111.0])
+
     def test_help_does_not_require_browser_dependencies(self):
         result = subprocess.run(
             [sys.executable, "-S", "check_in.py", "--help"],

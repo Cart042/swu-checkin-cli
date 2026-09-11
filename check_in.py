@@ -122,15 +122,30 @@ def run_config_check(cli_username=None, cli_password=None, *, config_dir=None):
             dependencies_ok = False
             print(f"[FAIL] 依赖：{label} 未安装或不可用 ({error})")
 
-    workers_raw = os.getenv("SWU_MAX_WORKERS", "").strip()
-    try:
-        workers = int(workers_raw) if workers_raw else 3
-    except ValueError:
-        workers = 3
-    if workers < 1 or (workers_raw and not workers_raw.isdigit()):
-        print(f"[WARN] 并发配置：SWU_MAX_WORKERS={workers_raw} 不是正整数，将使用默认值 3")
-    else:
-        print(f"[OK] 并发配置：最大线程数 {workers}")
+    runtime_options = config.parse_runtime_options()
+    runtime_issues = {
+        issue.spec.key: issue for issue in config.runtime_parameter_issues()
+    }
+    print("运行参数：")
+    for spec in config.RUNTIME_PARAMETER_SPECS:
+        value = getattr(runtime_options, spec.key)
+        issue = runtime_issues.get(spec.key)
+        if issue is not None:
+            prefix = "并发配置：" if spec.key == "max_workers" else "运行参数："
+            print(
+                f"[WARN] {prefix}{spec.env_name}={issue.raw_value!r} 无效（允许 "
+                f"{spec.minimum}-{spec.maximum}），将使用默认值 {value}"
+            )
+        elif spec.key == "max_workers":
+            print(
+                f"[OK] 并发配置：最大线程数 {value} "
+                f"（{spec.env_name}={value}，允许 {spec.minimum}-{spec.maximum}）"
+            )
+        else:
+            print(
+                f"[OK] {spec.label}：{spec.env_name}={value} "
+                f"（允许 {spec.minimum}-{spec.maximum}）"
+            )
 
     if errors:
         print("\n需要处理的问题：")

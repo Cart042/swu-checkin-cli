@@ -14,12 +14,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install python dependencies
+# Copy and install Python dependencies.  Keep pip's build cache out of the
+# image; CI uses setup-python's cache instead.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir -r requirements.txt
 
-# Install chromium and its system dependencies for Playwright
-RUN playwright install --with-deps chromium
+# The check-in code launches headless Chromium without a channel, so the
+# smaller headless shell is sufficient.  --with-deps also installs the Linux
+# libraries needed by the browser in the slim base image.
+RUN python -m playwright install --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy script files
 COPY . .

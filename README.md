@@ -30,7 +30,7 @@ cd swu-checkin-cli
 python3.11 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium
+python -m playwright install --with-deps --only-shell chromium
 python check_in.py -m
 ```
 
@@ -110,13 +110,21 @@ python check_in.py -m
 
 工作流保留每天北京时间 21:05 的定时触发、手动触发和并发保护。手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
 
-工作流使用 Python 3.11、浏览器登录和 Chromium。网络或登录页偶发异常时，优先手动重跑，再下载调试 artifact 查看页面结构变化。
+工作流使用 Python 3.11、浏览器登录和 Chromium headless shell。网络或登录页偶发异常时，优先手动重跑，再下载调试 artifact 查看页面结构变化。
 
-仓库另有 `Offline PR CI` 工作流。它只执行 Python 源码编译、离线单元测试和命令行帮助检查，不登录学校网站、不执行签到，也不需要真实账号。
+仓库另有 `Runtime PR CI` 工作流。它安装完整 `requirements.txt`，执行 Python 源码编译、离线单元测试、命令行帮助检查和运行时冒烟检查，不登录学校网站、不执行签到，也不需要真实账号。冒烟检查在 `127.0.0.1` 启动本地页面，用无 channel 的 headless Chromium 打开页面，再初始化 ddddocr 并识别仓库内置的合成验证码图片。浏览器和 OCR 初始化需要更多资源，因此该命令单独放在普通单元测试之外。
+
+需要本地验证完整运行时依赖时执行：
+
+```bash
+python scripts/smoke_runtime.py
+```
+
+安装命令使用 Playwright 的 [Chromium headless shell](https://playwright.dev/python/docs/browsers#chromium-headless-shell) 模式。PR CI 和定时签到工作流都通过 `actions/setup-python` 按 `requirements.txt` 启用 pip 缓存；相关配置见 [setup-python 的依赖缓存说明](https://github.com/actions/setup-python#caching-packages-dependencies)。缓存只加速 Python 依赖安装，运行内存变化应以实际测量为准。
 
 ## Docker
 
-Docker 镜像使用 Python 3.11 和 Playwright Chromium。推荐将 `/data` 挂载到宿主机保存账号和缓存：
+Docker 镜像使用 Python 3.11 和 Playwright Chromium headless shell。推荐将 `/data` 挂载到宿主机保存账号和缓存：
 
 ```bash
 mkdir -p data
@@ -207,6 +215,9 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 ├── school_api.py           # 学校 HTTP 会话、请求和接口数据
 ├── notify.py               # 推送渠道
 ├── runner.py               # 多账号并发、重试和汇总
+├── scripts/smoke_runtime.py # 本地 Chromium + ddddocr 运行时冒烟检查
+├── scripts/profile_login.py # 交互式只读登录和缓存性能测量（不执行签到）
+├── docs/performance.md      # 性能测量方法、限制和安全说明
 ├── Dockerfile              # Python 3.11 + Playwright 镜像
 ├── docker-compose.yml      # Docker Compose 配置
 ├── FILES.md                # 文件用途说明

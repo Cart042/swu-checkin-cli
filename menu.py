@@ -147,12 +147,21 @@ def menu_update_password(
 
 
 def menu_set_workers(config_dir=None) -> None:
-    raw = prompt_non_empty("请输入最大并发线程数（建议 1-3）：")
-    if not raw.isdigit() or int(raw) < 1:
-        print("并发线程数必须是正整数。")
+    spec = config.RUNTIME_PARAMETER_BY_KEY["max_workers"]
+    raw = prompt_non_empty(
+        f"请输入最大并发线程数（{spec.minimum}-{spec.maximum}）："
+    )
+    try:
+        value = int(raw, 10)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or not spec.minimum <= value <= spec.maximum:
+        print(
+            f"并发线程数必须是 {spec.minimum}-{spec.maximum} 之间的整数。"
+        )
         return
-    config.set_env_value("SWU_MAX_WORKERS", raw, config_dir=config_dir)
-    print(f"已写入 .env：SWU_MAX_WORKERS={raw}")
+    config.set_env_value(spec.env_name, raw, config_dir=config_dir)
+    print(f"已写入 .env：{spec.env_name}={raw}")
 
 
 def menu_set_telegram(
@@ -195,43 +204,37 @@ def menu_set_telegram(
 
 def menu_set_push(config_dir=None, *, prompt_password_func=None) -> None:
     print("\n推送配置")
-    print("1. 钉钉机器人")
-    print("2. 企业微信群机器人")
-    print("3. Bark")
-    print("4. Server 酱")
-    print("5. PushDeer")
-    print("6. Telegram")
+    for index, channel in enumerate(config.PUSH_CHANNELS, 1):
+        print(f"{index}. {channel.menu_label}")
     print("0. 返回")
     choice = input("请选择：").strip()
 
-    if choice == "1":
-        token = prompt_non_empty("PUSH_DINGTALK_TOKEN：")
-        secret = input("PUSH_DINGTALK_SECRET（可留空）：").strip()
-        config.set_env_value("PUSH_DINGTALK_TOKEN", token, config_dir=config_dir)
-        config.set_env_value("PUSH_DINGTALK_SECRET", secret, config_dir=config_dir)
-        print("已保存钉钉推送配置。")
-    elif choice == "2":
-        key = prompt_non_empty("PUSH_QYWX_KEY：")
-        config.set_env_value("PUSH_QYWX_KEY", key, config_dir=config_dir)
-        print("已保存企业微信推送配置。")
-    elif choice == "3":
-        key = prompt_non_empty("PUSH_BARK_KEY：")
-        url = input("PUSH_BARK_URL（默认 https://api.day.app）：").strip() or "https://api.day.app"
-        config.set_env_value("PUSH_BARK_KEY", key, config_dir=config_dir)
-        config.set_env_value("PUSH_BARK_URL", url, config_dir=config_dir)
-        print("已保存 Bark 推送配置。")
-    elif choice == "4":
-        key = prompt_non_empty("PUSH_SERVERCHAN_KEY：")
-        config.set_env_value("PUSH_SERVERCHAN_KEY", key, config_dir=config_dir)
-        print("已保存 Server 酱推送配置。")
-    elif choice == "5":
-        key = prompt_non_empty("PUSH_PUSHDEER_KEY：")
-        config.set_env_value("PUSH_PUSHDEER_KEY", key, config_dir=config_dir)
-        print("已保存 PushDeer 推送配置。")
-    elif choice == "6":
-        menu_set_telegram(config_dir, prompt_password_func=prompt_password_func)
-    elif choice != "0":
+    if choice == "0":
+        return
+    try:
+        index = int(choice, 10)
+    except (TypeError, ValueError):
+        index = 0
+    if not 1 <= index <= len(config.PUSH_CHANNELS):
         print("无效选项。")
+        return
+
+    channel = config.PUSH_CHANNELS[index - 1]
+    if channel.name == "Telegram":
+        menu_set_telegram(config_dir, prompt_password_func=prompt_password_func)
+        return
+
+    for env_name in channel.required_env:
+        value = prompt_non_empty(f"{env_name}：")
+        config.set_env_value(env_name, value, config_dir=config_dir)
+
+    for env_name in channel.optional_env:
+        if env_name == "PUSH_BARK_URL":
+            value = input(f"{env_name}（默认 https://api.day.app）：").strip() or "https://api.day.app"
+        else:
+            value = input(f"{env_name}（可留空）：").strip()
+        config.set_env_value(env_name, value, config_dir=config_dir)
+    print(f"已保存{channel.menu_label}推送配置。")
 
 
 def menu_show_paths(config_dir=None) -> None:
