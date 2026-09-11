@@ -47,6 +47,12 @@ cp .env.example .env
 python check_in.py --check-config
 ```
 
+`--check-config` 只检查本地账号、依赖、缓存和推送配置，不会访问学校网络。需要手动诊断网络时再运行：
+
+```bash
+python check_in.py --check-network
+```
+
 ## 账号配置
 
 程序按以下顺序读取账号：
@@ -55,6 +61,8 @@ python check_in.py --check-config
 2. 配置目录中的 `users.json`。
 3. `SWU_USERS` 环境变量中的 JSON 数组。
 4. `SWU_USERNAME` / `SWU_PASSWORD`。
+
+账号来源按顺序使用第一个有效的非空配置；已经存在但格式错误的高优先级来源会直接报错，不会静默改用低优先级来源。`.env` 会在读取这些来源前加载，进程环境变量（例如 GitHub Actions Secrets）优先于 `.env`。
 
 `users.json` 示例：
 
@@ -128,7 +136,7 @@ SWU_USERNAME=your_username SWU_PASSWORD=your_password \
 
 ## 网络
 
-学校接口请求和浏览器登录使用直连网络，并显式忽略运行环境中的代理变量。请先确认运行主机能够访问学校官网；`--check-config` 会提供连通性提示，但不会执行登录或签到。
+学校接口请求和浏览器登录使用直连网络，并显式忽略运行环境中的代理变量。正常签到直接执行登录和接口请求，不会先做重复的官网预检。`--check-network` 是显式的网络诊断选项；`--check-config` 保持纯本地检查。
 
 ## 推送
 
@@ -158,10 +166,13 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 | `SWU_RUN_DEADLINE_SECONDS` | 单次任务总时限，默认 `900` 秒 |
 | `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`；可选 `DEBUG`、`WARNING`、`ERROR` |
 | `SWU_DEBUG_DIR` | 登录异常调试目录；仅排查问题时设置，例如 `debug` |
+| `SWU_PUSH_DEADLINE_SECONDS` | 本次推送共享总预算，默认 `60` 秒，允许范围 `1-3600` 秒 |
 | `PUSH_TELEGRAM_BOT_TOKEN` | Telegram Bot Token；需与 Chat ID 同时设置 |
 | `PUSH_TELEGRAM_CHAT_ID` | Telegram 接收消息的 Chat ID；需与 Bot Token 同时设置 |
 
 失败账号的重试预算默认是 900 秒，重试轮数默认 3 轮；每次网络和浏览器操作都会按剩余预算设置超时。可通过 `SWU_RUN_DEADLINE_SECONDS` 调整预算（允许范围由程序校验）。
+
+推送通道共享独立的协作预算，默认 60 秒；可通过 `SWU_PUSH_DEADLINE_SECONDS` 调整，非法值会回退到 60 秒。
 
 ## 状态码
 
@@ -185,14 +196,23 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 ```text
 .
 ├── .github/workflows       # 定时、手动和离线 PR 检查
-├── check_in.py             # 签到流程、菜单、配置检查、运行锁和结果汇总
-├── get_info.py             # 浏览器登录、验证码、Token 和学校接口
+├── check_in.py             # CLI、配置检查、运行锁和结果汇总
+├── checkin_service.py      # 单账号签到流程和签到业务状态
+├── status.py               # CLI 与签到服务共用的状态码文本
+├── config.py               # 账号来源、校验、dotenv 和本地配置文件
+├── menu.py                 # 数字配置菜单
+├── get_info.py             # 浏览器登录、验证码和 Token
+├── login.py                # 延迟加载浏览器登录依赖
+├── cache.py                # Token 缓存读写
+├── school_api.py           # 学校 HTTP 会话、请求和接口数据
 ├── notify.py               # 推送渠道
 ├── runner.py               # 多账号并发、重试和汇总
 ├── Dockerfile              # Python 3.11 + Playwright 镜像
 ├── docker-compose.yml      # Docker Compose 配置
 ├── FILES.md                # 文件用途说明
 ├── requirements.txt        # Python 依赖
+├── tests/test_config.py     # 账号优先级、dotenv 和配置错误测试
+├── tests/test_menu.py       # 菜单文件操作测试
 ├── users.json.example      # 多账号示例
 ├── .env.example            # 环境变量模板
 └── README.md

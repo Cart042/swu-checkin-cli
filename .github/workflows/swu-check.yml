@@ -59,7 +59,7 @@ jobs:
       - name: Install Chromium for browser login
         run: playwright install chromium
 
-      - name: Check configuration
+      - name: Check local configuration
         run: python check_in.py --check-config
 
       - name: Run check-in

@@ -43,6 +43,14 @@ class FakeSession:
         self.closed = True
 
 
+class FakeClock:
+    def __init__(self, now=0.0):
+        self.now = float(now)
+
+    def __call__(self):
+        return self.now
+
+
 class NotifyOfflineTests(unittest.TestCase):
     def setUp(self):
         self.env = mock.patch.dict(
@@ -57,6 +65,7 @@ class NotifyOfflineTests(unittest.TestCase):
                 "PUSH_PUSHDEER_KEY": "",
                 "PUSH_TELEGRAM_BOT_TOKEN": "",
                 "PUSH_TELEGRAM_CHAT_ID": "",
+                "SWU_PUSH_DEADLINE_SECONDS": "",
             },
             clear=False,
         )
@@ -155,6 +164,105 @@ class NotifyOfflineTests(unittest.TestCase):
 
         session_factory.assert_called_once_with()
         self.assertTrue(session.closed)
+
+    def test_send_push_bounds_each_request_and_stops_after_shared_budget(self):
+        clock = FakeClock()
+
+        class SlowSession(FakeSession):
+            def post(self, url, **kwargs):
+                response = super().post(url, **kwargs)
+                clock.now += 6
+                return response
+
+        session = SlowSession([
+            FakeResponse(200, {"errcode": 0}),
+            FakeResponse(200, {"errcode": 0}),
+        ])
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SWU_PUSH_DEADLINE_SECONDS": "10",
+                "PUSH_DINGTALK_TOKEN": "ding-token",
+                "PUSH_QYWX_KEY": "qywx-key",
+                "PUSH_TELEGRAM_BOT_TOKEN": "telegram-token",
+                "PUSH_TELEGRAM_CHAT_ID": "chat",
+            },
+        ):
+            self.assertTrue(notify.send_push("title", "body", session, clock=clock))
+
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(
+            [call[2]["timeout"] for call in session.calls],
+            [10.0, 4.0],
+        )
+        self.assertIn("oapi.dingtalk.com", session.calls[0][1])
+        self.assertIn("qyapi.weixin.qq.com", session.calls[1][1])
+
+    def test_invalid_push_deadline_uses_bounded_default(self):
+        for raw in ("0", "-1", "3601", "not-a-number"):
+            with self.subTest(raw=raw), mock.patch.dict(
+                os.environ,
+                {"SWU_PUSH_DEADLINE_SECONDS": raw},
+            ):
+                self.assertEqual(
+                    notify._configured_push_deadline_seconds(),
+                    notify.DEFAULT_PUSH_DEADLINE_SECONDS,
+                )
+
+    def test_telegram_retry_wait_is_skipped_when_budget_is_insufficient(self):
+        clock = FakeClock()
+        sleeps = []
+        session = FakeSession([
+            FakeResponse(
+                429,
+                {"ok": False, "error_code": 429, "parameters": {"retry_after": 4}},
+            ),
+        ])
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SWU_PUSH_DEADLINE_SECONDS": "3",
+                "PUSH_TELEGRAM_BOT_TOKEN": "token",
+                "PUSH_TELEGRAM_CHAT_ID": "chat",
+            },
+        ):
+            self.assertFalse(
+                notify.send_push(
+                    "title",
+                    "body",
+                    session,
+                    clock=clock,
+                    sleep_func=sleeps.append,
+                )
+            )
+
+        self.assertEqual(sleeps, [])
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][2]["timeout"], 3.0)
+
+    def test_telegram_chunks_stop_when_shared_budget_expires(self):
+        clock = FakeClock()
+
+        class SlowSession(FakeSession):
+            def post(self, url, **kwargs):
+                response = super().post(url, **kwargs)
+                clock.now += 1.1
+                return response
+
+        body = "x" * (notify.TELEGRAM_MAX_MESSAGE_LENGTH + 1)
+        session = SlowSession([FakeResponse(200, {"ok": True})])
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SWU_PUSH_DEADLINE_SECONDS": "1",
+                "PUSH_TELEGRAM_BOT_TOKEN": "token",
+                "PUSH_TELEGRAM_CHAT_ID": "chat",
+            },
+        ):
+            self.assertFalse(notify.send_push("title", body, session, clock=clock))
+
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][2]["timeout"], 1.0)
 
     def test_network_write_timeout_is_not_retried(self):
         session = FakeSession([TimeoutError("write timeout")])
