@@ -8,9 +8,27 @@ import logging
 import sys
 import os
 import hashlib
-import tempfile
 import time
-from playwright.sync_api import sync_playwright
+from contextlib import contextmanager
+
+from cache import _token_cache_lock, load_cached_token, save_cached_token
+from school_api import (
+    DeadlineExceeded,
+    SwuBusinessError,
+    SwuRequestError,
+    TokenInvalidError,
+    _api_json as _school_api_json,
+    _remaining_seconds,
+    _redact_text as _school_redact_text,
+    _redact_url as _school_redact_url,
+    _timeout_with_deadline,
+    check_school_connectivity,
+    create_school_session,
+    get_dormitory,
+    get_student_id,
+    get_transition_today,
+    request_with_retry,
+)
 
 class SafeStreamHandler(logging.StreamHandler):
     def emit(self, record):
@@ -34,33 +52,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
 
 
-class DeadlineExceeded(TimeoutError):
-    """The operation could not finish before its monotonic deadline."""
-
-
-class SwuRequestError(requests.exceptions.RequestException):
-    """An HTTP response from a school endpoint was not successful."""
-
-    def __init__(self, message, *, status_code=None, response=None, method=None, url=None):
-        super().__init__(message, response=response)
-        self.status_code = status_code
-        self.response = response
-        self.method = method
-        self.url = url
-
-
-class TokenInvalidError(SwuRequestError):
-    """The school API rejected the current access token."""
-
-
-class SwuBusinessError(RuntimeError):
-    """The school API returned a successful HTTP response with bad business data."""
-
-
 class LoginError(Exception):
+    """A browser login failed for a reason understood by the CLI."""
+
     def __init__(self, reason, message):
         super().__init__(message)
         self.reason = reason
+
 
 def setup_logging():
     log_level_str = os.getenv("SWU_LOG_LEVEL", "INFO").upper().strip()
@@ -88,219 +86,57 @@ def setup_logging():
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
 
-_thread_local = threading.local()
-_token_cache_lock = threading.Lock()
-SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
-STANDARD_PROXY_ENV_KEYS = (
-    "HTTPS_PROXY",
-    "https_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-)
-
-def _proxy_url_with_auth(proxy_url, username="", password=""):
-    if not proxy_url or not username:
-        return proxy_url
-    parsed = urllib.parse.urlparse(proxy_url)
-    if parsed.username:
-        return proxy_url
-    netloc = parsed.netloc or parsed.path
-    if not netloc:
-        return proxy_url
-    auth = urllib.parse.quote(username, safe="")
-    if password:
-        auth += f":{urllib.parse.quote(password, safe='')}"
-    if parsed.netloc:
-        return urllib.parse.urlunparse(parsed._replace(netloc=f"{auth}@{netloc}"))
-    return f"{parsed.scheme}://{auth}@{netloc}"
+_ocr_init_lock = threading.Lock()
+_ocr_classification_lock = threading.Lock()
+_ocr_instance = None
 
 
-def get_proxy_config():
-    mode = os.getenv("SWU_PROXY_MODE", "auto").strip().lower()
-    if mode in {"off", "false", "0", "none", "disable", "disabled"}:
-        return None
-    proxy_url = os.getenv("SWU_PROXY_URL", "").strip()
-    source = "SWU_PROXY_URL"
-    if not proxy_url and mode != "manual":
-        for key in STANDARD_PROXY_ENV_KEYS:
-            value = os.getenv(key, "").strip()
-            if value:
-                proxy_url = value
-                source = key
-                break
-    if not proxy_url:
-        return None
-    if "://" not in proxy_url:
-        proxy_url = f"http://{proxy_url}"
-    username = os.getenv("SWU_PROXY_USERNAME", "").strip()
-    password = os.getenv("SWU_PROXY_PASSWORD", "").strip()
-    return {
-        "server": proxy_url,
-        "scheme": urllib.parse.urlparse(proxy_url).scheme.lower(),
-        "username": username,
-        "password": password,
-        "requests_url": _proxy_url_with_auth(proxy_url, username, password),
-        "source": source,
-    }
+# Cold logins start Chromium and load the captcha model.  Keep that expensive
+# path bounded to one process while cached-token/API work remains concurrent.
+_browser_login_semaphore = threading.BoundedSemaphore(1)
 
 
-def validate_proxy_config():
-    proxy = get_proxy_config()
-    if not proxy:
-        return True, None
-    parsed = urllib.parse.urlparse(proxy["server"])
-    if parsed.scheme.lower() not in SUPPORTED_PROXY_SCHEMES:
-        return False, f"不支持的代理协议：{parsed.scheme}，请使用 http、https、socks4 或 socks5"
-    if not parsed.hostname:
-        return False, "代理地址缺少主机名或 IP"
-    return True, None
-
-
-def mask_proxy_url(proxy_url):
-    if not proxy_url:
-        return ""
-    parsed = urllib.parse.urlparse(proxy_url)
-    if not parsed.netloc:
-        return proxy_url
-    host = parsed.hostname or ""
-    port = f":{parsed.port}" if parsed.port else ""
-    return urllib.parse.urlunparse(parsed._replace(netloc=f"{host}{port}"))
-
-
-def describe_proxy_config():
-    proxy = get_proxy_config()
-    if not proxy:
-        return "未配置"
-    auth_hint = "，已配置认证" if proxy.get("username") else ""
-    return f"{mask_proxy_url(proxy['server'])}{auth_hint}（来源：{proxy.get('source', 'unknown')}）"
-
-
-def apply_proxy_to_session(session):
-    session.trust_env = False
-    proxy = get_proxy_config()
-    if proxy:
-        session.proxies.update({
-            "http": proxy["requests_url"],
-            "https": proxy["requests_url"],
-        })
-    return session
-
-
-def playwright_proxy_options():
-    proxy = get_proxy_config()
-    if not proxy:
-        return None
-    options = {"server": proxy["server"]}
-    if proxy.get("username"):
-        options["username"] = proxy["username"]
-    if proxy.get("password"):
-        options["password"] = proxy["password"]
-    return options
-
-
-def check_school_connectivity(timeout=5):
-    """Probe the school site for diagnostics only.
-
-    A response with any HTTP status still proves that the network path is
-    reachable.  This helper must never perform login, refresh a token, or
-    change cached state.
-    """
-    session = apply_proxy_to_session(requests.Session())
+def _acquire_browser_login(deadline=None):
+    """Acquire a cold-login slot without waiting past ``deadline``."""
+    remaining = _remaining_seconds(deadline)
+    if remaining is None:
+        acquired = _browser_login_semaphore.acquire()
+    else:
+        acquired = _browser_login_semaphore.acquire(timeout=max(0.0, remaining))
+    if not acquired:
+        raise DeadlineExceeded("等待浏览器登录并发槽位已超过截止时间")
     try:
-        response = session.get("https://of.swu.edu.cn/", timeout=timeout)
-        return True, f"HTTP {response.status_code}"
-    except requests.exceptions.ProxyError as exc:
-        return False, f"代理连接失败：{_redact_text(exc)}"
-    except requests.exceptions.SSLError as exc:
-        return False, f"TLS/证书连接失败：{_redact_text(exc)}"
-    except requests.exceptions.Timeout as exc:
-        return False, f"连接学校官网超时：{_redact_text(exc)}"
-    except requests.exceptions.ConnectionError as exc:
-        return False, f"无法连接学校官网：{_redact_text(exc)}"
-    except requests.exceptions.RequestException as exc:
-        return False, f"请求学校官网失败：{_redact_text(exc)}"
-    finally:
-        close = getattr(session, "close", None)
-        if close:
-            close()
-
-
-def has_school_proxy_config():
-    return get_proxy_config() is not None
-
-
-_SENSITIVE_QUERY_KEYS = {
-    "password",
-    "passwd",
-    "pwd",
-    "token",
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "idtoken1",
-    "idtoken2",
-    "idtoken3",
-    "ticket",
-    "code",
-    "state",
-    "authorization",
-}
-_SENSITIVE_VALUE_RE = re.compile(
-    r"(?i)(\b(?:password|passwd|pwd|token|access_token|refresh_token|id_token|idtoken[123]|ticket|code|state|authorization)\b\s*[=:]\s*)([^\s&<>'\";,}]+)"
-)
-_BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+")
-
-
-def _redact_url(url):
-    """Remove credentials and one-time values from a URL used in diagnostics."""
-    if not url:
-        return ""
-    try:
-        parsed = urllib.parse.urlsplit(str(url))
-        query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-        safe_query = [
-            (key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else value)
-            for key, value in query_pairs
-        ]
-        fragment_pairs = urllib.parse.parse_qsl(parsed.fragment, keep_blank_values=True)
-        safe_fragment = (
-            urllib.parse.urlencode(
-                [
-                    (key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else value)
-                    for key, value in fragment_pairs
-                ]
-            )
-            if fragment_pairs
-            else parsed.fragment
-        )
-        return urllib.parse.urlunsplit(
-            (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(safe_query), safe_fragment)
-        )
+        # A slot can become available at the same instant the timeout expires.
+        # Do not start a browser after the caller's deadline in that case.
+        _remaining_seconds(deadline)
     except Exception:
-        return _redact_text(str(url))
+        _browser_login_semaphore.release()
+        raise
+    return True
 
 
-def _redact_text(value, secrets=()):
-    """Return diagnostic text with credentials and bearer/query secrets removed."""
-    if value is None:
-        return ""
-    text = str(value)
-    candidates = sorted(
-        {str(secret) for secret in secrets if secret is not None and str(secret)},
-        key=len,
-        reverse=True,
-    )
-    for secret in candidates:
-        # Very short values cause broad accidental replacements (for example
-        # a one-character captcha); query/field redaction below still catches
-        # those fields by name.
-        if len(secret) >= 2:
-            text = text.replace(secret, "[REDACTED]")
-    text = _SENSITIVE_VALUE_RE.sub(r"\1[REDACTED]", text)
-    text = _BEARER_RE.sub(r"\1[REDACTED]", text)
-    return text
+@contextmanager
+def _browser_login_slot(deadline=None):
+    """Hold one cold-browser slot and always return it to the pool."""
+    _acquire_browser_login(deadline)
+    try:
+        yield
+    finally:
+        _browser_login_semaphore.release()
+
+
+@contextmanager
+def _browser_playwright():
+    """Load Playwright after a browser slot has been acquired."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        yield playwright
+
+
+_redact_url = _school_redact_url
+_redact_text = _school_redact_text
+_api_json = _school_api_json
 
 
 def _debug_user_id(username):
@@ -380,7 +216,6 @@ def recover_from_idm_error_page(page, username, timeout, recovery_url=None, dead
         _remaining_seconds(deadline)
         if recovery_url:
             page.goto(recovery_url, wait_until="domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
-            page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
         else:
             link = page.locator('a:has-text("返回至登录页面")').first
             href = link.get_attribute("href", timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
@@ -394,7 +229,6 @@ def recover_from_idm_error_page(page, username, timeout, recovery_url=None, dead
             else:
                 link.click(timeout=_browser_timeout_ms(timeout, deadline))
                 page.wait_for_load_state("domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
-            page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
         logger.debug("账号 %s: 返回登录页面后 URL: %s", _debug_user_id(username), _redact_url(page.url))
         return True
     except Exception as exc:
@@ -409,7 +243,6 @@ def click_username_password_tab(page, username, timeout, deadline=None):
         if tab.count() > 0:
             logger.debug("账号 %s: 正在切换到用户名密码登录。", _debug_user_id(username))
             tab.click(timeout=_browser_timeout_ms(timeout, deadline))
-            page.wait_for_timeout(min(500, _browser_timeout_ms(timeout, deadline)))
             return True
     except Exception as exc:
         logger.debug("账号 %s: 切换用户名密码登录失败：%s", _debug_user_id(username), _redact_text(exc))
@@ -431,7 +264,6 @@ def captcha_locator(page):
 def get_captcha_image_bytes(page, captcha_el, timeout, deadline=None):
     _remaining_seconds(deadline)
     captcha_el.wait_for(state="visible", timeout=_browser_timeout_ms(timeout, deadline))
-    page.wait_for_timeout(min(500, _browser_timeout_ms(timeout, deadline)))
     try:
         handle = captcha_el.element_handle(timeout=_browser_timeout_ms(timeout, deadline))
         if handle:
@@ -483,7 +315,6 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
             if button.count() > 0:
                 logger.debug("账号 %s: 正在点击统一认证登录按钮...", _debug_user_id(username))
                 button.click(timeout=_browser_timeout_ms(timeout, deadline))
-                page.wait_for_timeout(min(1000, _browser_timeout_ms(timeout, deadline)))
                 continue
         except Exception as exc:
             logger.debug(
@@ -508,40 +339,27 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
 
 
 def get_ocr():
-    if not hasattr(_thread_local, "ocr"):
-        import ddddocr
-        _thread_local.ocr = ddddocr.DdddOcr(show_ad=False)
-    return _thread_local.ocr
+    """Return the process-wide lazily initialized OCR engine.
 
-_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
-_RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+    The ddddocr object owns a relatively large model.  Initializing one per
+    worker thread multiplies that cost, so construction is guarded and the
+    resulting object is shared.  Classification itself is guarded separately
+    because the library does not promise that one object is thread-safe.
+    """
+    global _ocr_instance
+    if _ocr_instance is None:
+        with _ocr_init_lock:
+            if _ocr_instance is None:
+                import ddddocr
+
+                _ocr_instance = ddddocr.DdddOcr(show_ad=False)
+    return _ocr_instance
 
 
-def _remaining_seconds(deadline):
-    if deadline is None:
-        return None
-    remaining = float(deadline) - time.monotonic()
-    if remaining <= 0:
-        raise DeadlineExceeded("操作已超过截止时间")
-    return remaining
-
-
-def _timeout_with_deadline(timeout, deadline):
-    remaining = _remaining_seconds(deadline)
-    if remaining is None:
-        return timeout
-    if timeout is None:
-        return remaining
-    if isinstance(timeout, (tuple, list)):
-        return tuple(
-            min(float(value), remaining) if value is not None else remaining
-            for value in timeout
-        )
-    try:
-        return min(float(timeout), remaining)
-    except (TypeError, ValueError):
-        return remaining
-
+def classify_captcha(image_bytes):
+    """Classify captcha bytes through the shared OCR engine safely."""
+    with _ocr_classification_lock:
+        return get_ocr().classification(image_bytes)
 
 def _browser_timeout_ms(timeout, deadline):
     """Convert the per-operation timeout to milliseconds without crossing deadline."""
@@ -554,185 +372,8 @@ def _browser_timeout_ms(timeout, deadline):
         return 1000
 
 
-def _http_status_error(method, url, status_code, response):
-    safe_url = _redact_url(url)
-    message = f"{method.upper()} {safe_url} 返回 HTTP {status_code}"
-    error_type = TokenInvalidError if status_code in {401, 403} else SwuRequestError
-    return error_type(
-        message,
-        status_code=status_code,
-        response=response,
-        method=method.upper(),
-        url=safe_url,
-    )
-
-
-def _sleep_before_retry(attempt, backoff_factor, deadline):
-    delay = max(0.0, float(backoff_factor)) ** attempt
-    remaining = _remaining_seconds(deadline)
-    if remaining is not None:
-        if remaining <= 0:
-            raise DeadlineExceeded("重试前已超过截止时间")
-        delay = min(delay, remaining)
-    if delay:
-        time.sleep(delay)
-
-
-def request_with_retry(
-    method,
-    url,
-    max_retries=3,
-    backoff_factor=2,
-    session=None,
-    retryable=None,
-    deadline=None,
-    **kwargs,
-):
-    """Issue a school request with bounded retries and HTTP validation.
-
-    Only explicitly retryable calls may repeat.  In particular, write calls
-    default to one attempt so a timeout cannot duplicate a check-in.
-    """
-    method_upper = str(method).upper()
-    if retryable is None:
-        retryable = method_upper in _IDEMPOTENT_METHODS
-    attempts = max(1, int(max_retries or 1)) if retryable else 1
-    own_client = session is None
-    client = session or apply_proxy_to_session(requests.Session())
-
-    try:
-        for attempt in range(1, attempts + 1):
-            call_kwargs = dict(kwargs)
-            if deadline is not None:
-                call_kwargs["timeout"] = _timeout_with_deadline(call_kwargs.get("timeout"), deadline)
-            try:
-                response = client.request(method, url, **call_kwargs)
-                _remaining_seconds(deadline)
-                status = getattr(response, "status_code", None)
-                if status is not None:
-                    try:
-                        status = int(status)
-                    except (TypeError, ValueError):
-                        raise SwuRequestError(
-                            f"{method_upper} {_redact_url(url)} 返回无效 HTTP 状态码",
-                            method=method_upper,
-                            url=_redact_url(url),
-                            response=response,
-                        )
-                    if not 200 <= status < 300:
-                        error = _http_status_error(method_upper, url, status, response)
-                        if retryable and status in _RETRYABLE_HTTP_STATUS and attempt < attempts:
-                            logger.warning(
-                                "请求 HTTP %s，将在重试后再次请求（第 %s/%s 次）：%s",
-                                status,
-                                attempt + 1,
-                                attempts,
-                                _redact_url(url),
-                            )
-                            _sleep_before_retry(attempt, backoff_factor, deadline)
-                            continue
-                        raise error
-                return response
-            except DeadlineExceeded:
-                raise
-            except requests.exceptions.RequestException as exc:
-                if deadline is not None and time.monotonic() >= float(deadline):
-                    raise DeadlineExceeded("请求已超过截止时间") from exc
-                can_retry_exception = isinstance(
-                    exc,
-                    (requests.exceptions.Timeout, requests.exceptions.ConnectionError),
-                )
-                if not retryable or not can_retry_exception or attempt >= attempts:
-                    logger.error("请求失败：%s", _redact_text(exc))
-                    raise
-                logger.warning(
-                    "请求异常，将在重试后再次请求（第 %s/%s 次）：%s",
-                    attempt + 1,
-                    attempts,
-                    _redact_text(exc),
-                )
-                _sleep_before_retry(attempt, backoff_factor, deadline)
-    finally:
-        if own_client:
-            close = getattr(client, "close", None)
-            if close:
-                close()
-
-def _load_cached_token(username, cache_path):
-    with _token_cache_lock:
-        try:
-            with open(cache_path, "r", encoding="utf-8") as handle:
-                cache = json.load(handle)
-            if not isinstance(cache, dict):
-                return None
-            token = cache.get(username)
-            return token if isinstance(token, str) and token else None
-        except (OSError, ValueError, TypeError):
-            return None
-
-
-def _save_cached_token(username, token, cache_path):
-    """Merge and atomically replace the token cache with restrictive modes."""
-    if not isinstance(token, str) or not token:
-        raise ValueError("不能缓存空 Token")
-    with _token_cache_lock:
-        absolute_path = os.path.abspath(cache_path)
-        directory = os.path.dirname(absolute_path) or "."
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(directory, 0o700)
-        except OSError:
-            pass
-        cache = {}
-        try:
-            with open(absolute_path, "r", encoding="utf-8") as handle:
-                loaded = json.load(handle)
-            if isinstance(loaded, dict):
-                cache = loaded
-        except (OSError, ValueError, TypeError):
-            pass
-        cache[str(username)] = token
-
-        fd, temporary_path = tempfile.mkstemp(prefix=".token-cache-", dir=directory, text=True)
-        try:
-            fchmod = getattr(os, "fchmod", None)
-            if fchmod is not None:
-                try:
-                    fchmod(fd, 0o600)
-                except (AttributeError, NotImplementedError, OSError):
-                    os.chmod(temporary_path, 0o600)
-            else:
-                os.chmod(temporary_path, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(cache, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                if hasattr(os, "fsync"):
-                    os.fsync(handle.fileno())
-            os.replace(temporary_path, absolute_path)
-            try:
-                os.chmod(absolute_path, 0o600)
-            except OSError:
-                pass
-            try:
-                directory_fd = os.open(directory, os.O_DIRECTORY)
-            except (AttributeError, OSError):
-                directory_fd = None
-            if directory_fd is not None:
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-            raise
+_load_cached_token = load_cached_token
+_save_cached_token = save_cached_token
 
 def _find_query_value_from_url(url, key):
     parsed = urllib.parse.urlparse(url)
@@ -747,6 +388,130 @@ def _find_query_value_from_url(url, key):
     if f"{key}=" in url:
         return urllib.parse.unquote(url.split(f"{key}=", 1)[1].split("&", 1)[0])
     return None
+
+
+def _url_hostname(url):
+    """Return a normalized URL hostname without inspecting query strings."""
+    try:
+        return (urllib.parse.urlsplit(str(url)).hostname or "").rstrip(".").lower()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _is_school_host(url):
+    """Whether ``url`` is hosted by the school's portal domain."""
+    hostname = _url_hostname(url)
+    return hostname == "of.swu.edu.cn" or hostname.endswith(".of.swu.edu.cn")
+
+
+def _token_from_local_storage(value):
+    """Extract an access token from the portal's stable local-storage shapes."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(value, dict):
+        return None
+
+    # Prefer the canonical key in the complete tree before considering loose
+    # legacy names.  Iteration order must not accidentally select a refresh or
+    # identity token that happens to precede access_token.
+    for key, item in value.items():
+        if str(key).lower() in {"access_token", "accesstoken"} and isinstance(item, str) and item:
+            return item
+    for key, item in value.items():
+        if isinstance(item, dict) or (isinstance(item, str) and "vuex" in str(key).lower()):
+            token = _token_from_local_storage(item)
+            if token:
+                return token
+
+    for key, item in value.items():
+        key_text = str(key).lower()
+        if key_text in {"refresh_token", "refreshtoken", "id_token", "idtoken"}:
+            continue
+        if isinstance(item, str) and item and ("token" in key_text or "auth" in key_text):
+            return item
+    return None
+
+
+def _local_storage_token(page):
+    """Read a token for explicit login-success detection, if one exists."""
+    try:
+        local_storage = page.evaluate("() => JSON.stringify(localStorage)")
+    except Exception:
+        return None
+    return _token_from_local_storage(local_storage)
+
+
+def _login_success_detected(page, login_entry_url):
+    """Detect a completed portal login from host and one-time/token state.
+
+    Looking for a domain substring in the complete URL is unsafe because the
+    initial CAS URL embeds the portal domain in its ``service`` query value.
+    Parse the actual hostname and require a ticket or token instead.
+    """
+    current_url = getattr(page, "url", "")
+    if not _is_school_host(current_url):
+        return False
+    ticket = _find_query_value_from_url(current_url, "ticket")
+    token = _local_storage_token(page)
+    if not ticket and not token:
+        return False
+    return current_url != login_entry_url or bool(token)
+
+
+def _wait_for_login_result(page, login_entry_url, timeout, deadline=None):
+    """Wait for a ticket/token condition without waiting for network quiescence."""
+    _remaining_seconds(deadline)
+    wait_for_function = getattr(page, "wait_for_function", None)
+    if wait_for_function is not None:
+        expression = """({ entryUrl }) => {
+            const parsed = new URL(window.location.href);
+            const host = (parsed.hostname || '').toLowerCase().replace(/\\.$/, '');
+            if (host !== 'of.swu.edu.cn' && !host.endsWith('.of.swu.edu.cn')) {
+                return false;
+            }
+            const hasTicket = parsed.searchParams.has('ticket') ||
+                new URLSearchParams(parsed.hash.replace(/^#/, '')).has('ticket');
+            const hasToken = Object.keys(window.localStorage).some((key) => {
+                const lower = key.toLowerCase();
+                return lower === 'access_token' || lower.includes('token') || lower.includes('auth');
+            });
+            return hasTicket || hasToken;
+        }"""
+        try:
+            wait_for_function(
+                expression,
+                arg={"entryUrl": login_entry_url},
+                timeout=_browser_timeout_ms(timeout, deadline),
+            )
+        except DeadlineExceeded:
+            raise
+        except Exception:
+            # A timeout means the captcha/error path should be inspected below.
+            # Other browser exceptions are handled by the existing login error
+            # mapping after the final explicit condition check.
+            pass
+    _remaining_seconds(deadline)
+    return _login_success_detected(page, login_entry_url)
+
+
+def _validate_and_cache_token(username, token, cache_path, timeout, session, deadline):
+    """Cache only a token that identifies the logged-in school account."""
+    if not isinstance(token, str) or not token:
+        raise LoginError("token_extract", "登录成功后提取到的 Token 格式无效")
+    # The exchange endpoint returning HTTP 200 is not enough to prove that a
+    # candidate local-storage value is the portal access token.  Validate its
+    # identity through the existing user API before persisting it.
+    get_student_id(
+        token,
+        timeout=min(timeout, 5),
+        session=session,
+        deadline=deadline,
+    )
+    _save_cached_token(username, token, cache_path)
+    return token
 
 
 def exchange_token_from_browser_page(page, ticket, timeout, deadline=None):
@@ -781,15 +546,15 @@ def exchange_token_from_browser_page(page, ticket, timeout, deadline=None):
         logger.debug("浏览器 exchange-token 请求异常：%s", _redact_text(exc))
         return None
     _remaining_seconds(deadline)
+    if not isinstance(result, dict):
+        logger.debug("浏览器 exchange-token 返回结构异常")
+        return None
     if not result.get("ok"):
         logger.debug(
             "浏览器 exchange-token 请求未成功：HTTP %s %s",
             result.get("status"),
             _redact_text(result.get("text")),
         )
-        return None
-    if not isinstance(result, dict):
-        logger.debug("浏览器 exchange-token 返回结构异常")
         return None
     data = result.get("data")
     if isinstance(data, str) and data:
@@ -863,7 +628,9 @@ def get_token(
 
     _remaining_seconds(deadline)
     logger.debug("账号 %s: 正在启动 Playwright Chromium 浏览器...", _debug_user_id(username))
-    with sync_playwright() as p:
+    # The context manager imports Playwright only after a cold-login slot is
+    # acquired, keeping the cached/API path entirely browser-free.
+    with _browser_login_slot(deadline), _browser_playwright() as p:
         launch_options = {
             "headless": True,
             "timeout": _browser_timeout_ms(timeout, deadline),
@@ -876,10 +643,7 @@ def get_token(
                 "--password-store=basic"
             ]
         }
-        proxy_options = playwright_proxy_options()
-        if proxy_options:
-            launch_options["proxy"] = proxy_options
-            logger.info("账号 %s: 浏览器登录将使用代理：%s", _debug_user_id(username), describe_proxy_config())
+        launch_options["args"].append("--no-proxy-server")
         browser = p.chromium.launch(
             **launch_options
         )
@@ -915,7 +679,7 @@ def get_token(
                 try:
                     page.goto(
                         cas_url,
-                        wait_until="networkidle",
+                        wait_until="domcontentloaded",
                         timeout=_browser_timeout_ms(timeout, deadline),
                     )
                     break
@@ -929,7 +693,6 @@ def get_token(
                         attempt,
                         _redact_text(e),
                     )
-                    page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
 
             login_entry_url = page.url
             ensure_login_form(page, username, timeout, recovery_url=cas_url, deadline=deadline)
@@ -959,8 +722,7 @@ def get_token(
                 img_bytes = get_captcha_image_bytes(page, captcha_el, timeout, deadline=deadline)
 
                 # Solve captcha
-                ocr = get_ocr()
-                code = ocr.classification(img_bytes)
+                code = classify_captcha(img_bytes)
                 logger.debug("账号 %s: 已识别验证码", _debug_user_id(username))
 
                 captcha_input_locator(page).fill(
@@ -972,28 +734,20 @@ def get_token(
                 logger.debug("账号 %s: 提交表单中...", _debug_user_id(username))
                 submit_button_locator(page).click(timeout=_browser_timeout_ms(timeout, deadline))
 
-                # Wait to check result
-                redirected = False
-                for step_check in range(5):
-                    _remaining_seconds(deadline)
-                    page.wait_for_timeout(min(1000, _browser_timeout_ms(timeout, deadline)))
-                    logger.debug(
-                        "账号 %s: 等待重定向 (第 %s 秒)，当前 URL: %s",
-                        _debug_user_id(username),
-                        step_check + 1,
-                        _redact_url(page.url),
-                    )
-                    current_url = page.url
-                    redirected = (
-                        current_url != login_entry_url
-                        and (
-                            bool(_find_query_value_from_url(current_url, "ticket"))
-                            or "resolve-cas-return" in current_url
-                            or "casLogin" in current_url
-                        )
-                    )
-                    if redirected:
-                        break
+                # Wait for an explicit portal-host ticket/token condition.
+                # Waiting for network quiescence is both slower and brittle on
+                # pages that keep analytics or polling requests open.
+                redirected = _wait_for_login_result(
+                    page,
+                    login_entry_url,
+                    timeout,
+                    deadline=deadline,
+                )
+                logger.debug(
+                    "账号 %s: 登录结果检查完成，当前 URL: %s",
+                    _debug_user_id(username),
+                    _redact_url(page.url),
+                )
 
                 if redirected:
                     logger.debug("账号 %s: 重定向成功！", _debug_user_id(username))
@@ -1019,7 +773,6 @@ def get_token(
                 try:
                     logger.debug("账号 %s: 验证码识别错误或重定向未触发，刷新验证码重试...", _debug_user_id(username))
                     captcha_el.click(timeout=_browser_timeout_ms(timeout, deadline))
-                    page.wait_for_timeout(min(1000, _browser_timeout_ms(timeout, deadline)))
                 except Exception:
                     pass
 
@@ -1027,64 +780,50 @@ def get_token(
                 save_login_debug_artifacts(page, username, "captcha_or_redirect_failed")
                 raise LoginError("captcha", "验证码连续识别失败，或登录服务没有完成跳转")
 
-            # Extract token from localStorage
+            # Extract token from localStorage.  The explicit ticket/token
+            # condition above means no network-idle wait is needed here.
             _remaining_seconds(deadline)
             logger.debug("账号 %s: 正在从 localStorage 提取 access_token...", _debug_user_id(username))
-            try:
-                page.wait_for_load_state("networkidle", timeout=_browser_timeout_ms(timeout, deadline))
-            except Exception:
-                _remaining_seconds(deadline)
-                page.wait_for_timeout(min(2000, _browser_timeout_ms(timeout, deadline)))
 
             ticket = _find_query_value_from_url(page.url, "ticket")
             if ticket:
                 logger.debug("账号 %s: 已从跳转地址获取 CAS ticket，正在交换 Token...", _debug_user_id(username))
                 token = exchange_token_from_browser_page(page, ticket, timeout, deadline=deadline)
                 if token:
-                    _save_cached_token(username, token, cache_path)
+                    token = _validate_and_cache_token(
+                        username,
+                        token,
+                        cache_path,
+                        timeout,
+                        session,
+                        deadline,
+                    )
                     logger.debug("账号 %s: 通过 CAS ticket 交换 Token 成功", _debug_user_id(username))
                     return token
 
             _remaining_seconds(deadline)
-            local_storage = page.evaluate("() => JSON.stringify(localStorage)")
-            ls_dict = json.loads(local_storage)
-
-            token = None
-            for k, v in ls_dict.items():
-                if k == 'access_token':
-                    token = v
-                    break
-                if 'token' in k.lower() or 'auth' in k.lower():
-                    token = v
-                if 'vuex' in k.lower():
-                    try:
-                        vx = json.loads(v)
-                        def search_dict(dct):
-                            for vk, vv in dct.items():
-                                if isinstance(vv, dict):
-                                    t = search_dict(vv)
-                                    if t: return t
-                                elif isinstance(vv, str) and ('token' in vk.lower() or 'auth' in vk.lower()):
-                                    if len(vv) > 5:
-                                        return vv
-                            return None
-                        t = search_dict(vx)
-                        if t:
-                            token = t
-                    except Exception:
-                        pass
+            token = _local_storage_token(page)
 
             if not token:
                 save_login_debug_artifacts(page, username, "token_extract_failed")
                 raise LoginError("token_extract", "登录成功后无法从 localStorage 中提取 Token")
 
-            if not isinstance(token, str) or not token:
-                raise LoginError("token_extract", "登录成功后提取到的 Token 格式无效")
-            _save_cached_token(username, token, cache_path)
+            token = _validate_and_cache_token(
+                username,
+                token,
+                cache_path,
+                timeout,
+                session,
+                deadline,
+            )
             logger.debug("账号 %s: Token 提取并缓存成功", _debug_user_id(username))
             return token
 
         except DeadlineExceeded:
+            raise
+        except TokenInvalidError:
+            raise
+        except (requests.exceptions.RequestException, SwuRequestError, SwuBusinessError):
             raise
         except LoginError as exc:
             save_login_debug_artifacts(page, username, getattr(exc, "reason", "login_error"), exc)
@@ -1100,94 +839,3 @@ def get_token(
             raise LoginError("unknown", f"获取令牌失败: {_redact_text(e, [username, password])}")
         finally:
             browser.close()
-
-_SUCCESS_CODES = {0, 200, 1100, "0", "200", "1100"}
-_TOKEN_INVALID_CODES = {401, 403, 4010, 40101, 40102, "401", "403", "4010", "40101", "40102"}
-
-
-def _api_json(response, endpoint):
-    try:
-        body = response.json()
-    except (TypeError, ValueError) as exc:
-        raise SwuBusinessError(f"{endpoint} 返回的 JSON 无法解析: {exc}") from exc
-    if not isinstance(body, dict):
-        raise SwuBusinessError(f"{endpoint} 返回结构不是对象")
-
-    code = body.get("code")
-    message = body.get("msg", body.get("message", ""))
-    message_text = str(message) if message is not None else ""
-    token_hint = re.search(r"(?i)(token|登录已过期|登录失效|未授权|无效凭证|认证失败)", message_text)
-    if code in _TOKEN_INVALID_CODES or token_hint:
-        raise TokenInvalidError(
-            f"{endpoint} Token 无效",
-            status_code=401 if code is None else code,
-            response=response,
-        )
-    if code is not None and code not in _SUCCESS_CODES:
-        raise SwuBusinessError(f"{endpoint} 返回业务错误：code={code!r}, message={_redact_text(message_text)}")
-    return body
-
-
-def get_student_id(token, timeout=10, session=None, deadline=None):
-    url = "https://of.swu.edu.cn/gateway/fighter-middle/api/auth/user?appType=fighter-portal"
-    headers = {"fighter-auth-token": token}
-    response = request_with_retry(
-        "GET",
-        url,
-        headers=headers,
-        timeout=timeout,
-        session=session,
-        retryable=True,
-        deadline=deadline,
-    )
-    body = _api_json(response, "用户信息接口")
-    try:
-        student_id = body["data"]["subject"]["username"]
-    except (KeyError, TypeError) as exc:
-        raise SwuBusinessError(f"用户信息接口返回结构异常: {exc}") from exc
-    if not isinstance(student_id, (str, int)) or isinstance(student_id, bool) or not str(student_id):
-        raise SwuBusinessError("用户信息接口返回的学号无效")
-    return str(student_id)
-
-
-def get_dormitory(token, timeout=10, session=None, deadline=None):
-    url = "https://of.swu.edu.cn/gateway/fighter-baida/api/cqlc/getDormitory"
-    headers = {"fighter-auth-token": token, "Content-Type": "application/json;charset=UTF-8"}
-    response = request_with_retry(
-        "POST",
-        url,
-        headers=headers,
-        data=json.dumps({}),
-        timeout=timeout,
-        session=session,
-        retryable=True,
-        deadline=deadline,
-    )
-    return _api_json(response, "宿舍信息接口")
-
-
-def get_transition_today(token, timeout=10, session=None, deadline=None):
-    url = "https://of.swu.edu.cn//gateway/fighter-baida/api/cqtj/getTransitionByToday"
-    headers = {"fighter-auth-token": token}
-    data = {"pageNum": 1, "pageSize": 1}
-    response = request_with_retry(
-        "POST",
-        url,
-        headers=headers,
-        data=data,
-        timeout=timeout,
-        session=session,
-        retryable=True,
-        deadline=deadline,
-    )
-    body = _api_json(response, "今日签到任务接口")
-    try:
-        records = body["data"]["records"]
-    except (KeyError, TypeError) as exc:
-        raise SwuBusinessError(f"今日签到任务接口返回结构异常: {exc}") from exc
-    if not isinstance(records, list):
-        raise SwuBusinessError("今日签到任务接口 records 不是数组")
-    record = records[0] if records else None
-    if record is not None and not isinstance(record, dict):
-        raise SwuBusinessError("今日签到任务接口记录不是对象")
-    return record

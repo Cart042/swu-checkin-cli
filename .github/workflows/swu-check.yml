@@ -27,6 +27,15 @@ jobs:
       TZ: Asia/Shanghai
       SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
       SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
+      PUSH_DINGTALK_TOKEN: ${{ secrets.PUSH_DINGTALK_TOKEN }}
+      PUSH_DINGTALK_SECRET: ${{ secrets.PUSH_DINGTALK_SECRET }}
+      PUSH_QYWX_KEY: ${{ secrets.PUSH_QYWX_KEY }}
+      PUSH_BARK_KEY: ${{ secrets.PUSH_BARK_KEY }}
+      PUSH_BARK_URL: ${{ secrets.PUSH_BARK_URL }}
+      PUSH_SERVERCHAN_KEY: ${{ secrets.PUSH_SERVERCHAN_KEY }}
+      PUSH_PUSHDEER_KEY: ${{ secrets.PUSH_PUSHDEER_KEY }}
+      PUSH_TELEGRAM_BOT_TOKEN: ${{ secrets.PUSH_TELEGRAM_BOT_TOKEN }}
+      PUSH_TELEGRAM_CHAT_ID: ${{ secrets.PUSH_TELEGRAM_CHAT_ID }}
       SWU_LOG_LEVEL: INFO
       SWU_RUN_DEADLINE_SECONDS: "900"
       SWU_DEBUG_DIR: ${{ inputs.debug == true && 'debug' || '' }}
@@ -43,14 +52,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Install Chromium for browser login
-        run: playwright install chromium
+      - name: Install Chromium headless shell for browser login
+        run: python -m playwright install --with-deps --only-shell chromium
 
-      - name: Check configuration
+      - name: Check local configuration
         run: python check_in.py --check-config
 
       - name: Run check-in

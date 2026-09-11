@@ -1,5 +1,6 @@
 """Offline regression tests for the browser login/API boundary."""
 
+import ast
 import json
 import os
 import stat
@@ -40,6 +41,105 @@ class LoginApiOfflineTests(unittest.TestCase):
         self.assertNotIn("SWU_LOGIN_METHOD", source)
         self.assertNotIn("from des import", source)
         self.assertNotIn("_transform_ticket", source)
+        self.assertNotIn("_".join(("SWU", "PROXY")), source)
+        self.assertNotIn('launch_options["proxy"]', source)
+        self.assertNotIn('wait_until="networkidle"', source)
+        tree = ast.parse(source)
+        top_level_imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+        self.assertFalse(
+            any(
+                (node.module or "").startswith("playwright")
+                for node in top_level_imports
+                if isinstance(node, ast.ImportFrom)
+            )
+        )
+        self.assertFalse(
+            any(
+                alias.name.startswith("playwright")
+                for node in top_level_imports
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            )
+        )
+
+    def test_school_session_ignores_proxy_environment_and_has_no_proxy_map(self):
+        class Session:
+            def __init__(self):
+                self.trust_env = True
+                self.proxies = {"https": "http://must-not-be-used.invalid"}
+
+        session = Session()
+        with mock.patch.object(get_info.requests, "Session", return_value=session), mock.patch.dict(
+            os.environ,
+            {"HTTPS_PROXY": "http://must-not-be-used.invalid", "ALL_PROXY": "http://must-not-be-used.invalid"},
+            clear=False,
+        ):
+            direct = get_info.create_school_session()
+        self.assertIs(direct, session)
+        self.assertFalse(direct.trust_env)
+        self.assertEqual(direct.proxies, {})
+
+    def test_initial_cas_service_query_is_not_a_login_redirect(self):
+        cas_url = (
+            "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
+            "?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Fresolve-cas-return"
+        )
+
+        class Page:
+            url = cas_url
+
+            def evaluate(self, _script):
+                return "{}"
+
+        page = Page()
+        self.assertFalse(get_info._login_success_detected(page, cas_url))
+        page.url = "https://of.swu.edu.cn/gateway/resolve-cas-return?ticket=one-time"
+        self.assertTrue(get_info._login_success_detected(page, cas_url))
+
+    def test_login_result_wait_uses_explicit_arg_keyword(self):
+        class Page:
+            url = "https://of.swu.edu.cn/cas/login"
+
+            def __init__(self):
+                self.calls = []
+
+            def wait_for_function(self, expression, **kwargs):
+                self.calls.append((expression, kwargs))
+                self.url = "https://of.swu.edu.cn/gateway/resolve-cas-return?ticket=one-time"
+
+            def evaluate(self, _script):
+                return "{}"
+
+        page = Page()
+        self.assertTrue(get_info._wait_for_login_result(page, "https://of.swu.edu.cn/cas/login", 5))
+        self.assertEqual(len(page.calls), 1)
+        self.assertIn("arg", page.calls[0][1])
+        self.assertNotIn("networkidle", page.calls[0][0])
+
+    def test_local_storage_prefers_access_token_over_other_token_values(self):
+        payload = {
+            "refresh_token": "refresh-token",
+            "auth": "auth-value",
+            "access_token": "access-token",
+        }
+        self.assertEqual(get_info._token_from_local_storage(payload), "access-token")
+
+    def test_invalid_new_token_is_not_cached(self):
+        with mock.patch.object(
+            get_info,
+            "get_student_id",
+            side_effect=get_info.TokenInvalidError("invalid"),
+        ), mock.patch.object(get_info, "_save_cached_token") as save:
+            with self.assertRaises(get_info.TokenInvalidError):
+                get_info._validate_and_cache_token(
+                    "student",
+                    "candidate-token",
+                    "/tmp/unused-token-cache.json",
+                    5,
+                    object(),
+                    None,
+                )
+        save.assert_not_called()
 
     def test_write_request_is_never_retried(self):
         session = FakeSession([FakeResponse(500), FakeResponse(200)])
@@ -115,10 +215,69 @@ class LoginApiOfflineTests(unittest.TestCase):
                 get_info,
                 "get_student_id",
                 side_effect=get_info.requests.exceptions.ConnectionError("offline"),
-            ), mock.patch.object(get_info, "sync_playwright") as browser:
+            ), mock.patch.object(get_info, "_browser_login_slot") as browser_slot:
                 with self.assertRaises(get_info.requests.exceptions.ConnectionError):
                     get_info.get_token("student", "password")
-                browser.assert_not_called()
+                browser_slot.assert_not_called()
+
+    def test_student_id_is_reused_for_one_session(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {"code": 200, "data": {"subject": {"username": "student-id"}}},
+                )
+            ]
+        )
+        self.assertEqual(get_info.get_student_id("candidate-token", session=session), "student-id")
+        self.assertEqual(get_info.get_student_id("candidate-token", session=session), "student-id")
+        self.assertEqual(len(session.calls), 1)
+
+    def test_student_id_cache_is_scoped_to_session(self):
+        response = FakeResponse(
+            200,
+            {"code": 200, "data": {"subject": {"username": "student-id"}}},
+        )
+        first = FakeSession([response])
+        second = FakeSession([response])
+        self.assertEqual(get_info.get_student_id("candidate-token", session=first), "student-id")
+        self.assertEqual(get_info.get_student_id("candidate-token", session=second), "student-id")
+        self.assertEqual(len(first.calls), 1)
+        self.assertEqual(len(second.calls), 1)
+
+    def test_student_id_cache_is_keyed_by_token(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {"code": 200, "data": {"subject": {"username": "student-a"}}},
+                ),
+                FakeResponse(
+                    200,
+                    {"code": 200, "data": {"subject": {"username": "student-b"}}},
+                ),
+            ]
+        )
+        self.assertEqual(get_info.get_student_id("token-a", session=session), "student-a")
+        self.assertEqual(get_info.get_student_id("token-b", session=session), "student-b")
+        self.assertEqual(len(session.calls), 2)
+
+    def test_failed_student_id_response_is_not_cached(self):
+        valid_response = FakeResponse(
+            200,
+            {"code": 200, "data": {"subject": {"username": "student-id"}}},
+        )
+        cases = (
+            (FakeResponse(401, {"message": "expired"}), get_info.TokenInvalidError),
+            (FakeResponse(200, {"code": 500, "message": "temporary failure"}), get_info.SwuBusinessError),
+        )
+        for failed_response, error_type in cases:
+            with self.subTest(error_type=error_type.__name__):
+                session = FakeSession([failed_response, valid_response])
+                with self.assertRaises(error_type):
+                    get_info.get_student_id("token", session=session)
+                self.assertEqual(get_info.get_student_id("token", session=session), "student-id")
+                self.assertEqual(len(session.calls), 2)
 
     def test_debug_artifact_contains_no_page_or_credentials(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
