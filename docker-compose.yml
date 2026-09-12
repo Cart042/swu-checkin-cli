@@ -2,6 +2,11 @@ services:
   swu-checkin:
     build: .
     image: swu-checkin-cli
+    # 镜像内的运行用户是 uid/gid 10001。绑定挂载 ./data 时，宿主机目录必须
+    # 对该 uid 可写：先执行 `mkdir -p data && sudo chown -R 10001:10001 data`，
+    # 或者用 `SWU_UID=$(id -u) SWU_GID=$(id -g) docker compose run ...`
+    # 覆盖成当前用户。
+    user: "${SWU_UID:-10001}:${SWU_GID:-10001}"
     environment:
       TZ: Asia/Shanghai
       SWU_CONFIG_DIR: /data

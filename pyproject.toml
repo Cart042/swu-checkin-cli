@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swu-checkin"
-version = "1.1.0"
+version = "1.2.0"
 description = "西南大学自动打卡命令行工具，使用浏览器登录，支持多账号、Docker、GitHub Actions 和多通道推送"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Cart042" }]
 keywords = ["swu", "checkin", "automation", "cli", "playwright"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: OS Independent",

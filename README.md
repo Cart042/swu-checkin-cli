@@ -15,7 +15,7 @@
 
 - 浏览器登录学校统一认证页面，自动识别登录页验证码并获取 Token。
 - 使用 `users.json` 或环境变量管理多个账号。
-- 用 `python check_in.py -m` 打开数字菜单，配置账号、并发和推送。
+- 用 `swu-checkin -m`（或 `python check_in.py -m`）打开数字菜单，配置账号、并发和推送。
 - 使用 Docker Compose 在 VPS 上运行一次性任务。
 - 使用 GitHub Actions 在每天北京时间 21:05（UTC 13:05）定时运行，也可以手动运行。
 - 支持钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。
@@ -147,13 +147,20 @@ python scripts/smoke_runtime.py
 
 ## Docker
 
-Docker 镜像使用 Python 3.11 和 Playwright Chromium headless shell。推荐将 `/data` 挂载到宿主机保存账号和缓存：
+Docker 镜像使用 Python 3.11 和 Playwright Chromium headless shell，并以非 root 用户（uid/gid `10001`）运行：容器内长期保存账号、Token 缓存、日志和运行锁。推荐将 `/data` 挂载到宿主机保存账号和缓存：
 
 ```bash
 mkdir -p data
+sudo chown -R 10001:10001 data
 docker compose build
 docker compose run --rm -it swu-checkin python check_in.py -m
 docker compose run --rm swu-checkin
+```
+
+绑定挂载的宿主机目录必须对容器内的 uid `10001` 可写，上面的 `chown` 就是为此。如果不想用固定 uid，可以在运行时覆盖成当前用户：
+
+```bash
+SWU_UID=$(id -u) SWU_GID=$(id -g) docker compose run --rm swu-checkin
 ```
 
 也可以通过环境变量传入单个账号：
@@ -163,7 +170,28 @@ SWU_USERNAME=your_username SWU_PASSWORD=your_password \
   docker compose run --rm swu-checkin
 ```
 
+需要登录诊断文本时，把 `SWU_DEBUG_DIR` 指向数据目录，例如 `-e SWU_DEBUG_DIR=/data/debug`，这样诊断文件会落在挂载卷里而不是容器内的临时层。
+
 不要把真实账号、`.env`、Token 缓存、日志、调试目录或运行锁放入镜像。`.dockerignore` 已排除这些运行文件。
+
+## 发布
+
+推送 `v*` 标签会触发 `.github/workflows/release.yml`：
+
+1. 校验标签与 `pyproject.toml` 的 `project.version` 一致（不一致直接失败）；
+2. 构建 sdist 与 wheel，作为 Release 附件发布；
+3. 构建 Docker 镜像并推送到 GHCR：`ghcr.io/cart042/swu-checkin-cli:<version>`，正式版本额外打 `:<major>.<minor>` 和 `:latest` 标签。
+
+发版流程：
+
+```bash
+# 1. 修改 pyproject.toml 与 src/swu_checkin/__init__.py 的版本号
+# 2. 确认 CI 通过后打标签
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+镜像只在 `linux/amd64` 上发布（目标是 VPS）；需要 arm64 时请在本机执行 `docker build -t swu-checkin-cli .`。依赖更新由 `.github/dependabot.yml` 每周检查 Python 依赖、GitHub Actions 和 Docker 基础镜像。
 
 ## 网络
 
