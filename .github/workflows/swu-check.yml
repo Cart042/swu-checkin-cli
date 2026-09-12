@@ -30,6 +30,8 @@ jobs:
     timeout-minutes: 20
     env:
       TZ: Asia/Shanghai
+      # 推荐使用 SWU_USERS 配置一个或多个账号；若未设置，则继续兼容旧的单账号 Secrets。
+      SWU_USERS: ${{ secrets.SWU_USERS }}
       SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
       SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
       PUSH_DINGTALK_TOKEN: ${{ secrets.PUSH_DINGTALK_TOKEN }}
