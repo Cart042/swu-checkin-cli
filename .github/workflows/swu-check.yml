@@ -55,11 +55,16 @@ jobs:
         if: ${{ inputs.debug == true }}
         run: mkdir -p debug
 
-      - name: Set up Python on self-hosted runner
+      - name: Verify Python 3.11 on self-hosted runner
         if: ${{ github.repository == 'Cart042/swu-checkin-cli' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v python3.11 >/dev/null 2>&1; then
+            echo "python3.11 is required on the self-hosted runner."
+            exit 1
+          fi
+          python3.11 --version
 
       - name: Set up Python on GitHub-hosted runner
         if: ${{ github.repository != 'Cart042/swu-checkin-cli' }}
@@ -81,7 +86,7 @@ jobs:
           mkdir -p "${runtime_dir}"
 
           fingerprint="$({
-            python -c 'import sys; print(sys.version)'
+            python3.11 -c 'import sys; print(sys.version)'
             sha256sum requirements.txt
           } | sha256sum | awk '{print $1}')"
 
@@ -90,7 +95,7 @@ jobs:
             || [[ "$(cat "${marker}" 2>/dev/null || true)" != "${fingerprint}" ]]; then
             echo "Runtime changed; rebuilding persistent virtual environment."
             rm -rf "${venv_dir}"
-            python -m venv "${venv_dir}"
+            python3.11 -m venv "${venv_dir}"
             "${venv_dir}/bin/python" -m pip install \
               --disable-pip-version-check \
               -r requirements.txt
