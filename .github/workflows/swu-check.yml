@@ -2,11 +2,11 @@ name: SWU Check-in
 
 on:
   schedule:
-    # 每天北京时间 21:05 触发一次。GitHub cron 使用 UTC 时间。
+    # 每天北京时间 21:05 自动运行。GitHub cron 使用 UTC 时间。
     #
-    # 定时触发只在仓库变量 SWU_CHECKIN_ENABLED 为 true 时才真正打卡，默认不开：
-    # 这样"每天自动打卡"必须由人显式开启，也不会因为 GitHub 在仓库长期不活跃后
-    # 自动停用定时工作流而悄悄失效（开关状态记录在仓库里，随时能查）。
+    # 定时是否会触发由工作流自身的启用状态决定（Actions 页面 Enable/Disable
+    # workflow，或 gh workflow enable/disable）。状态保存在 GitHub 上而不是仓库
+    # 里，GitHub 会在仓库长期不活跃后自动停用，README 里有排查说明。
     - cron: "5 13 * * *"
   workflow_dispatch:
     inputs:
@@ -25,13 +25,6 @@ concurrency:
 
 jobs:
   check-in:
-    # 定时触发需要显式开启 SWU_CHECKIN_ENABLED；未开启（变量不存在或不是 "true"）
-    # 时本次运行直接跳过，不登录、不使用任何凭据、也不提交打卡。
-    # 手动触发不受开关限制，方便临时补打卡。
-    #
-    # 开启每日自动打卡：gh variable set SWU_CHECKIN_ENABLED --body true
-    # 关闭每日自动打卡：gh variable delete SWU_CHECKIN_ENABLED
-    if: github.event_name == 'workflow_dispatch' || vars.SWU_CHECKIN_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -54,12 +47,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # 记下本次运行是手动触发还是开关已开启，方便回头审计。
-      - name: Report how this run was started
-        run: |
-          echo "触发方式: ${{ github.event_name }}"
-          echo "SWU_CHECKIN_ENABLED: ${{ vars.SWU_CHECKIN_ENABLED }}"
 
       - name: Prepare debug directory
         if: ${{ inputs.debug == true }}

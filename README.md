@@ -131,23 +131,23 @@ gh secret set SWU_PASSWORD --body '<校园网密码>'
 
 仓库里没有配置这两个 Secret 时，runner 里的 `SWU_USERNAME` / `SWU_PASSWORD` 是空值，工作流会停在配置检查并报 `[FAIL] 账号配置：未找到可用账号`。
 
-### 定时打卡需要显式开启
+### 开启 / 关闭每日自动打卡
 
-每天北京时间 21:05 的定时触发**默认不会打卡**，必须先手动打开仓库变量开关：
+每天北京时间 21:05 的定时触发由**工作流自身的启用状态**决定，直接在仓库里切换即可：
 
 ```bash
-# 开启每日自动打卡
-gh variable set SWU_CHECKIN_ENABLED --body true
-
-# 关闭每日自动打卡
-gh variable delete SWU_CHECKIN_ENABLED
+gh workflow enable  swu-check.yml   # 开启每日自动打卡
+gh workflow disable swu-check.yml   # 完全关闭：定时和手动都不再触发
 ```
 
-也可以在 **Settings → Secrets and variables → Actions → Variables** 里添加或删除同名变量。开关未打开时，定时运行会直接跳过：不登录学校系统、不使用任何凭据、也不会提交打卡，Actions 列表里只会留下一条 `skipped` 记录。
+也可以在 Actions 页面左上角使用 **Enable workflow / Disable workflow**。注意两个容易踩的点：
 
-这样做的原因是 GitHub 会在仓库长期不活跃后自动停用定时工作流（本项目就发生过：`main` 从 6 月 30 日起没有提交，定时打卡在 8 月 29 日被停掉）。开关状态保存在仓库里，可以随时用 `gh variable list` 确认，不会像工作流的启用状态那样被单方面改变。把定时打卡当作心跳也有额外好处：如果哪天连 `skipped` 记录都没有了，说明定时触发本身出了问题。
+- 这个状态保存在 GitHub 上，不在仓库里。GitHub 会在仓库长期不活跃后自动停用定时工作流（本项目就遇到过：`main` 从 6 月 30 日起没有提交，定时打卡在 8 月 29 日——正好 60 天后——被停掉），所以一段时间没收到打卡记录时，先来 Actions 页面确认工作流还是 enabled。
+- **被禁用的工作流连手动触发也不可用**（GitHub 会返回 `HTTP 422: Cannot trigger a 'workflow_dispatch' on a disabled workflow`）。只想临时补一次打卡时，先 `enable`、跑完再 `disable`。
 
-手动触发**不受开关限制**，任何时候都可以用 `gh workflow run swu-check.yml` 或 Actions 页面的 **Run workflow** 补一次打卡。手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
+> **Fork 本项目的用户注意**：GitHub 默认不在 fork 里运行定时工作流，而且 Secrets 不会随 fork 复制过来。要让它工作必须自己动手两步：① 在 fork 的 Actions 页面点 **Enable workflow** 启用 `SWU Check-in`，否则定时任务永远不会触发；② 按上面的说明配置自己的 `SWU_USERNAME` / `SWU_PASSWORD`。启用后每天北京时间 21:05 自动打卡，也可以用 **Run workflow** 手动跑一次。
+
+手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
 
 工作流使用 Python 3.11、浏览器登录和 Chromium headless shell。网络或登录页偶发异常时，优先手动重跑，再下载调试 artifact 查看页面结构变化。登录链路的已知失败特征、设备 Cookie 规则和失败原因对照见 [docs/login-troubleshooting.md](docs/login-troubleshooting.md)。
 
