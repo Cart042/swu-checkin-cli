@@ -24,7 +24,6 @@
 | `docker-compose.yml` | Docker Compose 部署配置，挂载 `./data` 到容器 `/data` 并运行一次性签到任务。 |
 | `cache.py` | Token 缓存的原子读写和进程内并发保护。 |
 | `get_info.py` | 浏览器登录、验证码识别、脱敏登录诊断文本和 Token 获取。 |
-| `login.py` | 延迟加载 Playwright 和登录错误类型。 |
 | `school_api.py` | 学校 HTTP 会话、网络诊断、请求重试和学校接口数据。 |
 | `notify.py` | 钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。 |
 | `requirements.txt` | Python 直接运行依赖列表，供签到运行时和 CI 运行时冒烟检查使用。 |
@@ -32,6 +31,7 @@
 | `scripts/smoke_runtime.py` | 独立运行时冒烟检查：启动本地页面和无 channel 的 headless Chromium，并用合成无敏感图片验证 ddddocr；不访问学校网络或执行签到。 |
 | `scripts/profile_login.py` | 交互式只读登录和 Token 缓存性能测量；通过标准输入接收凭据，仅输出脱敏的阶段耗时和进程资源摘要，不执行签到或推送。 |
 | `docs/performance.md` | 性能测量命令、采样口径、凭据安全和当前环境限制说明。 |
+| `docs/login-troubleshooting.md` | 统一认证链路的已知失败特征、设备 Cookie 规则、可调开关与登录失败原因对照。 |
 | `tests/test_check_in.py` | 不访问网络的签到、配置和重试边界测试。 |
 | `tests/test_config.py` | 账号优先级、dotenv 加载和配置错误测试。 |
 | `tests/test_menu.py` | 不访问网络的菜单文件操作测试。 |

@@ -18,6 +18,7 @@ STATUS_MESSAGES = {
 LOGIN_REASON_STATUS = {
     "credential": 3,
     "page_load": 6,
+    "waf_blocked": 6,
     "captcha": 7,
     "token_extract": 8,
     "login_page_changed": 9,
