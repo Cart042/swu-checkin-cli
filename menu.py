@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import config
 
@@ -148,17 +148,13 @@ def menu_update_password(
 
 def menu_set_workers(config_dir=None) -> None:
     spec = config.RUNTIME_PARAMETER_BY_KEY["max_workers"]
-    raw = prompt_non_empty(
-        f"请输入最大并发线程数（{spec.minimum}-{spec.maximum}）："
-    )
+    raw = prompt_non_empty(f"请输入最大并发线程数（{spec.minimum}-{spec.maximum}）：")
     try:
         value = int(raw, 10)
     except (TypeError, ValueError):
         value = None
     if value is None or not spec.minimum <= value <= spec.maximum:
-        print(
-            f"并发线程数必须是 {spec.minimum}-{spec.maximum} 之间的整数。"
-        )
+        print(f"并发线程数必须是 {spec.minimum}-{spec.maximum} 之间的整数。")
         return
     config.set_env_value(spec.env_name, raw, config_dir=config_dir)
     print(f"已写入 .env：{spec.env_name}={raw}")
@@ -272,7 +268,8 @@ def menu_test_push(config_dir=None) -> None:
         print(f"无法加载推送模块：{exc}")
         return
     title = "SWU 自动打卡测试通知"
-    content = f"这是一条测试推送。\n配置目录：{config.get_config_dir(config_dir)}\n发送时间：{time.strftime('%Y-%m-%d %H:%M:%S')}"
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    content = f"这是一条测试推送。\n配置目录：{config.get_config_dir(config_dir)}\n发送时间：{timestamp}"
     print("正在发送测试推送...")
     send_push(title, content)
     print("测试推送已触发，请检查对应平台是否收到消息。")

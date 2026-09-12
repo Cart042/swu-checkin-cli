@@ -17,7 +17,9 @@ import os
 import time
 
 import config
-from status import LOGIN_REASON_STATUS, STATUS_MESSAGES
+
+# ``LOGIN_REASON_STATUS`` 仍然从本模块导出，历史调用方按旧路径导入它。
+from status import LOGIN_REASON_STATUS, STATUS_MESSAGES  # noqa: F401
 
 BASE_DIR = config.BASE_DIR
 # Kept as a public setting for deployments and callers that override it.
@@ -26,6 +28,7 @@ logger = logging.getLogger("swu.check_in")
 
 RETRYABLE_STATUSES = {4, 6, 10, 11}
 TERMINAL_SUCCESS_STATUSES = {0, 1, 2, 5}
+
 
 def _resolve_accounts(cli_username=None, cli_password=None):
     return config.resolve_accounts(
@@ -88,7 +91,7 @@ def run_config_check(cli_username=None, cli_password=None, *, config_dir=None):
     token_cache_path = os.path.join(directory, ".token_cache.json")
     if os.path.exists(token_cache_path):
         try:
-            with open(token_cache_path, "r", encoding="utf-8") as handle:
+            with open(token_cache_path, encoding="utf-8") as handle:
                 cached_tokens = json.load(handle)
             print(f"[OK] Token 缓存：已存在，包含 {len(cached_tokens)} 个账号")
         except Exception as exc:
@@ -123,9 +126,7 @@ def run_config_check(cli_username=None, cli_password=None, *, config_dir=None):
             print(f"[FAIL] 依赖：{label} 未安装或不可用 ({error})")
 
     runtime_options = config.parse_runtime_options()
-    runtime_issues = {
-        issue.spec.key: issue for issue in config.runtime_parameter_issues()
-    }
+    runtime_issues = {issue.spec.key: issue for issue in config.runtime_parameter_issues()}
     print("运行参数：")
     for spec in config.RUNTIME_PARAMETER_SPECS:
         value = getattr(runtime_options, spec.key)
@@ -137,15 +138,9 @@ def run_config_check(cli_username=None, cli_password=None, *, config_dir=None):
                 f"{spec.minimum}-{spec.maximum}），将使用默认值 {value}"
             )
         elif spec.key == "max_workers":
-            print(
-                f"[OK] 并发配置：最大线程数 {value} "
-                f"（{spec.env_name}={value}，允许 {spec.minimum}-{spec.maximum}）"
-            )
+            print(f"[OK] 并发配置：最大线程数 {value} （{spec.env_name}={value}，允许 {spec.minimum}-{spec.maximum}）")
         else:
-            print(
-                f"[OK] {spec.label}：{spec.env_name}={value} "
-                f"（允许 {spec.minimum}-{spec.maximum}）"
-            )
+            print(f"[OK] {spec.label}：{spec.env_name}={value} （允许 {spec.minimum}-{spec.maximum}）")
 
     if errors:
         print("\n需要处理的问题：")
@@ -206,6 +201,7 @@ def acquire_run_lock():
     try:
         if os.name == "nt":
             import msvcrt
+
             if os.fstat(fd).st_size == 0:
                 os.write(fd, b"0")
             os.lseek(fd, 0, os.SEEK_SET)
@@ -218,6 +214,7 @@ def acquire_run_lock():
             _RUN_LOCK_STYLE = "msvcrt"
         else:
             import fcntl
+
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
@@ -228,10 +225,13 @@ def acquire_run_lock():
                 return None
             _RUN_LOCK_STYLE = "fcntl"
 
-        metadata = json.dumps(
-            {"pid": os.getpid(), "started_at": time.strftime("%Y-%m-%d %H:%M:%S")},
-            ensure_ascii=False,
-        ) + "\n"
+        metadata = (
+            json.dumps(
+                {"pid": os.getpid(), "started_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         fchmod = getattr(os, "fchmod", None)
         if fchmod is not None:
             try:
@@ -249,10 +249,12 @@ def acquire_run_lock():
         with contextlib.suppress(Exception):
             if _RUN_LOCK_STYLE == "msvcrt":
                 import msvcrt
+
                 os.lseek(fd, 0, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
             elif _RUN_LOCK_STYLE == "fcntl":
                 import fcntl
+
                 fcntl.flock(fd, fcntl.LOCK_UN)
         with contextlib.suppress(OSError):
             os.close(fd)
@@ -267,10 +269,12 @@ def release_run_lock(lock_path):
     try:
         if _RUN_LOCK_STYLE == "msvcrt":
             import msvcrt
+
             os.lseek(_RUN_LOCK_FD, 0, os.SEEK_SET)
             msvcrt.locking(_RUN_LOCK_FD, msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(_RUN_LOCK_FD, fcntl.LOCK_UN)
     except Exception as exc:
         logger.warning("释放运行锁失败：%s", exc)
@@ -279,7 +283,6 @@ def release_run_lock(lock_path):
             os.close(_RUN_LOCK_FD)
         _RUN_LOCK_FD = None
         _RUN_LOCK_STYLE = None
-
 
 
 def run_accounts(accounts, force_login=False, checkin_func=None, sleep_func=time.sleep, clock=time.monotonic):

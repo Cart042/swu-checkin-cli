@@ -74,12 +74,15 @@ def atomic_write_text(
     os.makedirs(directory, mode=0o700, exist_ok=True)
 
     fd, temporary_path = tempfile.mkstemp(prefix=prefix, dir=directory, text=True)
+    # Ownership of ``fd`` moves to the stream on ``os.fdopen``; the exception
+    # path must therefore track it separately from the still-open descriptor.
+    descriptor: int | None = fd
     try:
         _set_private_mode(fd, temporary_path, mode)
         handle = os.fdopen(fd, "w", encoding="utf-8")
         # fdopen now owns and will close the descriptor.  Do not retain the
         # integer for the exception path: the OS may reuse it immediately.
-        fd = None
+        descriptor = None
         with handle:
             handle.write(content)
             handle.flush()
@@ -96,10 +99,10 @@ def atomic_write_text(
         _sync_directory(directory)
     except Exception:
         # Only close a descriptor still owned by this function.  Once fdopen
-        # succeeds, ``fd`` is None and the stream owns descriptor cleanup.
-        if fd is not None:
+        # succeeds, ``descriptor`` is None and the stream owns cleanup.
+        if descriptor is not None:
             try:
-                os.close(fd)
+                os.close(descriptor)
             except OSError:
                 pass
         try:

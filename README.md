@@ -239,6 +239,36 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 - 不要提交 `.env`、`users.json`、`.token_cache.json`、`data/`、`logs/`、`debug/` 或 `.run.lock`。
 - 如果怀疑账号或 Token 泄露，请先修改校园网密码，再删除 Token 缓存并使用 `--force-login` 重新登录。
 
+## 开发与代码检查
+
+本地开发使用与运行环境一致的 Python 3.11 或 3.12：
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -e ".[dev,test]"
+```
+
+提交前请至少运行以下三条命令，它们的失败会直接阻断 PR：
+
+```bash
+ruff check .
+ruff format --check .
+python -m unittest discover -s tests
+```
+
+类型检查使用宽松设置，只保证已有代码不引入新的类型错误：
+
+```bash
+mypy
+```
+
+浏览器和验证码相关的运行时依赖不参与离线单元测试。需要完整验证本地运行时（headless Chromium + ddddocr）时再运行：
+
+```bash
+python -m playwright install --with-deps --only-shell chromium
+python scripts/smoke_runtime.py
+```
+
 ## Credits
 
 核心打卡逻辑基于开源项目 [ptbb2005/swu-checkin](https://github.com/ptbb2005/swu-checkin)，本项目在浏览器登录、多账号、缓存、Docker 部署和推送体验上做了整理。

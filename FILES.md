@@ -26,6 +26,7 @@
 | `get_info.py` | 浏览器登录、验证码识别、脱敏登录诊断文本和 Token 获取。 |
 | `school_api.py` | 学校 HTTP 会话、网络诊断、请求重试和学校接口数据。 |
 | `notify.py` | 钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。 |
+| `pyproject.toml` | Python 项目元数据，以及 Ruff 和 mypy 的共享配置；PR CI 与本地开发使用同一份设置。 |
 | `requirements.txt` | Python 直接运行依赖列表，供签到运行时和 CI 运行时冒烟检查使用。 |
 | `runner.py` | 多账号并发、有限重试、deadline 和结果汇总。 |
 | `scripts/smoke_runtime.py` | 独立运行时冒烟检查：启动本地页面和无 channel 的 headless Chromium，并用合成无敏感图片验证 ddddocr；不访问学校网络或执行签到。 |

@@ -46,9 +46,7 @@ class LoginApiOfflineTests(unittest.TestCase):
         self.assertIn(get_info._platform_user_agent_token(), user_agent)
         self.assertEqual(
             get_info._platform_user_agent_token(),
-            get_info._PLATFORM_UA_TOKENS.get(
-                sys.platform, get_info._PLATFORM_UA_TOKENS["win32"]
-            ),
+            get_info._PLATFORM_UA_TOKENS.get(sys.platform, get_info._PLATFORM_UA_TOKENS["win32"]),
         )
 
     def test_login_user_agent_falls_back_instead_of_going_headless(self):
@@ -126,8 +124,9 @@ class LoginApiOfflineTests(unittest.TestCase):
         page.goto.return_value = mock.Mock(status=200)
         context = mock.Mock()
         context.cookies.return_value = []
-        with mock.patch.object(get_info, "_drop_federation_cookies") as drop, mock.patch.object(
-            get_info, "_wait_for_login_result", return_value=True
+        with (
+            mock.patch.object(get_info, "_drop_federation_cookies") as drop,
+            mock.patch.object(get_info, "_wait_for_login_result", return_value=True),
         ):
             recovered = get_info._recover_blocked_oauth_hop(
                 page,
@@ -232,11 +231,13 @@ class LoginApiOfflineTests(unittest.TestCase):
                 page.expect_navigation.return_value.__enter__.return_value.value = mock.Mock(status=status)
                 login = mock.Mock()
                 login.wait_for.side_effect = TimeoutError("no visible form")
-                with mock.patch.object(get_info, "recover_from_idm_error_page"), mock.patch.object(
-                    get_info, "click_username_password_tab"
-                ), mock.patch.object(get_info, "login_name_locator", return_value=login), mock.patch.object(
-                    get_info, "password_locator", return_value=mock.Mock()
-                ), mock.patch.object(get_info, "save_login_debug_artifacts"):
+                with (
+                    mock.patch.object(get_info, "recover_from_idm_error_page"),
+                    mock.patch.object(get_info, "click_username_password_tab"),
+                    mock.patch.object(get_info, "login_name_locator", return_value=login),
+                    mock.patch.object(get_info, "password_locator", return_value=mock.Mock()),
+                    mock.patch.object(get_info, "save_login_debug_artifacts"),
+                ):
                     with self.assertRaises(get_info.LoginError) as caught:
                         get_info.ensure_login_form(page, "offline", 5)
                 self.assertEqual(caught.exception.reason, "page_load")
@@ -253,10 +254,11 @@ class LoginApiOfflineTests(unittest.TestCase):
         login = mock.Mock()
         login.wait_for.side_effect = [TimeoutError("landing page"), None]
         password = mock.Mock()
-        with mock.patch.object(get_info, "recover_from_idm_error_page"), mock.patch.object(
-            get_info, "click_username_password_tab"
-        ), mock.patch.object(get_info, "login_name_locator", return_value=login), mock.patch.object(
-            get_info, "password_locator", return_value=password
+        with (
+            mock.patch.object(get_info, "recover_from_idm_error_page"),
+            mock.patch.object(get_info, "click_username_password_tab"),
+            mock.patch.object(get_info, "login_name_locator", return_value=login),
+            mock.patch.object(get_info, "password_locator", return_value=password),
         ):
             get_info.ensure_login_form(page, "offline", 5)
         self.assertEqual(login.wait_for.call_count, 2)
@@ -267,9 +269,7 @@ class LoginApiOfflineTests(unittest.TestCase):
         page = mock.Mock()
         page.locator.return_value.inner_text.return_value = "验证失败"
         page.goto.return_value = mock.Mock(status=400)
-        outcome = get_info.recover_from_idm_error_page(
-            page, "offline", 5, recovery_url="https://school.invalid/login"
-        )
+        outcome = get_info.recover_from_idm_error_page(page, "offline", 5, recovery_url="https://school.invalid/login")
         # The caller keeps its retry budget; the HTTP classification is applied
         # only once the attempts are exhausted.
         self.assertEqual(outcome, 400)
@@ -279,11 +279,13 @@ class LoginApiOfflineTests(unittest.TestCase):
         page.locator.return_value.first.count.return_value = 0
         login = mock.Mock()
         login.wait_for.side_effect = TimeoutError("no visible form")
-        with mock.patch.object(get_info, "recover_from_idm_error_page", return_value=503) as recover, mock.patch.object(
-            get_info, "click_username_password_tab"
-        ), mock.patch.object(get_info, "login_name_locator", return_value=login), mock.patch.object(
-            get_info, "password_locator", return_value=mock.Mock()
-        ), mock.patch.object(get_info, "save_login_debug_artifacts"):
+        with (
+            mock.patch.object(get_info, "recover_from_idm_error_page", return_value=503) as recover,
+            mock.patch.object(get_info, "click_username_password_tab"),
+            mock.patch.object(get_info, "login_name_locator", return_value=login),
+            mock.patch.object(get_info, "password_locator", return_value=mock.Mock()),
+            mock.patch.object(get_info, "save_login_debug_artifacts"),
+        ):
             with self.assertRaises(get_info.LoginError) as caught:
                 get_info.ensure_login_form(page, "offline", 5)
         self.assertEqual(caught.exception.reason, "page_load")
@@ -342,18 +344,14 @@ class LoginApiOfflineTests(unittest.TestCase):
     def test_load_login_entry_retries_a_transient_error_page(self):
         page = mock.Mock()
         page.goto.side_effect = [mock.Mock(status=400), mock.Mock(status=200)]
-        get_info._load_login_entry(
-            page, "offline", "https://idm.swu.edu.cn/am/UI/Login", 5
-        )
+        get_info._load_login_entry(page, "offline", "https://idm.swu.edu.cn/am/UI/Login", 5)
         self.assertEqual(page.goto.call_count, 2)
 
     def test_load_login_entry_reports_page_load_when_retries_run_out(self):
         page = mock.Mock()
         page.goto.return_value = mock.Mock(status=503)
         with self.assertRaises(get_info.LoginError) as caught:
-            get_info._load_login_entry(
-                page, "offline", "https://idm.swu.edu.cn/am/UI/Login", 5
-            )
+            get_info._load_login_entry(page, "offline", "https://idm.swu.edu.cn/am/UI/Login", 5)
         self.assertEqual(caught.exception.reason, "page_load")
         self.assertEqual(str(caught.exception), "认证页面返回 HTTP 503")
 
@@ -379,9 +377,7 @@ class LoginApiOfflineTests(unittest.TestCase):
         # bounded excerpt instead of reporting "no error at all".
         page = mock.Mock()
         page.evaluate.return_value = ""
-        page.locator.return_value.inner_text.return_value = (
-            "统一认证 验证失败。动态口令验证失败 返回至登录页面"
-        )
+        page.locator.return_value.inner_text.return_value = "统一认证 验证失败。动态口令验证失败 返回至登录页面"
         text = get_info.read_login_error_message(page, 5)
         self.assertIn("验证失败", text)
         self.assertLess(len(text), 120)
@@ -425,10 +421,13 @@ class LoginApiOfflineTests(unittest.TestCase):
                 self.proxies = {"https": "http://must-not-be-used.invalid"}
 
         session = Session()
-        with mock.patch.object(get_info.requests, "Session", return_value=session), mock.patch.dict(
-            os.environ,
-            {"HTTPS_PROXY": "http://must-not-be-used.invalid", "ALL_PROXY": "http://must-not-be-used.invalid"},
-            clear=False,
+        with (
+            mock.patch.object(get_info.requests, "Session", return_value=session),
+            mock.patch.dict(
+                os.environ,
+                {"HTTPS_PROXY": "http://must-not-be-used.invalid", "ALL_PROXY": "http://must-not-be-used.invalid"},
+                clear=False,
+            ),
         ):
             direct = get_info.create_school_session()
         self.assertIs(direct, session)
@@ -481,11 +480,14 @@ class LoginApiOfflineTests(unittest.TestCase):
         self.assertEqual(get_info._token_from_local_storage(payload), "access-token")
 
     def test_invalid_new_token_is_not_cached(self):
-        with mock.patch.object(
-            get_info,
-            "get_student_id",
-            side_effect=get_info.TokenInvalidError("invalid"),
-        ), mock.patch.object(get_info, "_save_cached_token") as save:
+        with (
+            mock.patch.object(
+                get_info,
+                "get_student_id",
+                side_effect=get_info.TokenInvalidError("invalid"),
+            ),
+            mock.patch.object(get_info, "_save_cached_token") as save,
+        ):
             with self.assertRaises(get_info.TokenInvalidError):
                 get_info._validate_and_cache_token(
                     "student",
@@ -499,9 +501,7 @@ class LoginApiOfflineTests(unittest.TestCase):
 
     def test_write_request_is_never_retried(self):
         session = FakeSession([FakeResponse(500), FakeResponse(200)])
-        with mock.patch.object(
-            get_info.time, "sleep", side_effect=AssertionError("write request slept")
-        ):
+        with mock.patch.object(get_info.time, "sleep", side_effect=AssertionError("write request slept")):
             with self.assertRaises(get_info.SwuRequestError) as caught:
                 get_info.request_with_retry(
                     "POST",
@@ -515,9 +515,7 @@ class LoginApiOfflineTests(unittest.TestCase):
     def test_idempotent_request_retries_transient_http_status(self):
         session = FakeSession([FakeResponse(503), FakeResponse(200, {"ok": True})])
         with mock.patch.object(get_info.time, "sleep", return_value=None):
-            response = get_info.request_with_retry(
-                "GET", "https://school.invalid/read", session=session
-            )
+            response = get_info.request_with_retry("GET", "https://school.invalid/read", session=session)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(session.calls), 2)
 
@@ -532,9 +530,7 @@ class LoginApiOfflineTests(unittest.TestCase):
 
         page = Page()
         with mock.patch.object(get_info.time, "monotonic", return_value=10.0):
-            token = get_info.exchange_token_from_browser_page(
-                page, "ticket-secret", timeout=15, deadline=20.0
-            )
+            token = get_info.exchange_token_from_browser_page(page, "ticket-secret", timeout=15, deadline=20.0)
         self.assertEqual(token, "ticket-token")
         self.assertEqual(page.calls[0][1]["timeoutMs"], 10000)
         self.assertIn("AbortController", page.calls[0][0])
@@ -542,9 +538,7 @@ class LoginApiOfflineTests(unittest.TestCase):
     def test_http_401_is_token_invalid(self):
         session = FakeSession([FakeResponse(401, {"message": "expired"})])
         with self.assertRaises(get_info.TokenInvalidError) as caught:
-            get_info.request_with_retry(
-                "GET", "https://school.invalid/user", session=session
-            )
+            get_info.request_with_retry("GET", "https://school.invalid/user", session=session)
         self.assertEqual(caught.exception.status_code, 401)
 
     def test_cache_is_atomic_and_private(self):
@@ -552,9 +546,7 @@ class LoginApiOfflineTests(unittest.TestCase):
             cache_path = Path(directory) / "nested" / ".token_cache.json"
             get_info._save_cached_token("student", "secret-token", str(cache_path))
 
-            self.assertEqual(
-                get_info._load_cached_token("student", str(cache_path)), "secret-token"
-            )
+            self.assertEqual(get_info._load_cached_token("student", str(cache_path)), "secret-token")
             self.assertEqual(stat.S_IMODE(cache_path.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(cache_path.parent.stat().st_mode), 0o700)
             self.assertEqual(list(cache_path.parent.glob(".token-cache-*")), [])
@@ -567,11 +559,15 @@ class LoginApiOfflineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cache_path = Path(directory) / ".token_cache.json"
             get_info._save_cached_token("student", "cached-token", str(cache_path))
-            with mock.patch.object(get_info, "CONFIG_DIR", directory), mock.patch.object(
-                get_info,
-                "get_student_id",
-                side_effect=get_info.requests.exceptions.ConnectionError("offline"),
-            ), mock.patch.object(get_info, "_browser_login_slot") as browser_slot:
+            with (
+                mock.patch.object(get_info, "CONFIG_DIR", directory),
+                mock.patch.object(
+                    get_info,
+                    "get_student_id",
+                    side_effect=get_info.requests.exceptions.ConnectionError("offline"),
+                ),
+                mock.patch.object(get_info, "_browser_login_slot") as browser_slot,
+            ):
                 with self.assertRaises(get_info.requests.exceptions.ConnectionError):
                     get_info.get_token("student", "password")
                 browser_slot.assert_not_called()
@@ -636,8 +632,9 @@ class LoginApiOfflineTests(unittest.TestCase):
                 self.assertEqual(len(session.calls), 2)
 
     def test_debug_artifact_contains_no_page_or_credentials(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
-            os.environ, {"SWU_DEBUG_DIR": directory}, clear=False
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(os.environ, {"SWU_DEBUG_DIR": directory}, clear=False),
         ):
 
             class Page:

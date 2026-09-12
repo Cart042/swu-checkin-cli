@@ -18,14 +18,14 @@ import io
 import json
 import math
 import os
-from pathlib import Path
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-
+from pathlib import Path
+from typing import TypedDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_INTERVAL_SECONDS = 0.05
@@ -42,9 +42,7 @@ def _timeout_value(value: str) -> float:
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError("超时必须是有限的正数") from exc
     if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TIMEOUT_SECONDS:
-        raise argparse.ArgumentTypeError(
-            f"超时必须大于 0 且不超过 {MAX_TIMEOUT_SECONDS:g} 秒"
-        )
+        raise argparse.ArgumentTypeError(f"超时必须大于 0 且不超过 {MAX_TIMEOUT_SECONDS:g} 秒")
     return timeout
 
 
@@ -103,12 +101,22 @@ def _descendants(root_pid: int) -> set[int]:
     return found
 
 
-def _sample_process_tree(root_pid: int, peak: dict[str, object]) -> None:
+class _PeakRecord(TypedDict):
+    """Sampled process-tree measurements for one scenario."""
+
+    peak_tree_rss_kib: int
+    peak_process_rss_kib: int
+    sample_count: int
+    browser_pids: set[int]
+    observed_pids: set[int]
+
+
+def _sample_process_tree(root_pid: int, peak: _PeakRecord) -> None:
     pids = _descendants(root_pid)
     tree_rss_kib = 0
     process_rss_kib = 0
-    browser_pids: set[int] = peak["browser_pids"]  # type: ignore[assignment]
-    observed_pids: set[int] = peak["observed_pids"]  # type: ignore[assignment]
+    browser_pids = peak["browser_pids"]
+    observed_pids = peak["observed_pids"]
     for pid in pids:
         _, rss_kib = _proc_status(pid)
         if rss_kib is not None:
@@ -125,9 +133,9 @@ def _sample_process_tree(root_pid: int, peak: dict[str, object]) -> None:
         ):
             browser_pids.add(pid)
 
-    peak["peak_tree_rss_kib"] = max(int(peak["peak_tree_rss_kib"]), tree_rss_kib)
-    peak["peak_process_rss_kib"] = max(int(peak["peak_process_rss_kib"]), process_rss_kib)
-    peak["sample_count"] = int(peak["sample_count"]) + 1
+    peak["peak_tree_rss_kib"] = max(peak["peak_tree_rss_kib"], tree_rss_kib)
+    peak["peak_process_rss_kib"] = max(peak["peak_process_rss_kib"], process_rss_kib)
+    peak["sample_count"] = peak["sample_count"] + 1
 
 
 def _process_group_exists(pgid: int) -> bool:
@@ -145,9 +153,7 @@ def _process_group_exists(pgid: int) -> bool:
         # EPERM means the group exists but cannot be inspected with the
         # current permissions.  Treat other errors conservatively as present
         # so cleanup still attempts to terminate it.
-        if exc.errno == errno.ESRCH:
-            return False
-        return True
+        return exc.errno != errno.ESRCH
     return True
 
 
@@ -230,6 +236,8 @@ def _read_worker_stdout(process: subprocess.Popen[str], timeout: float = 5.0) ->
 
 def _worker(scenario: str, config_dir: str, timeout: float) -> int:
     """Run one scenario; credentials arrive through stdin only."""
+    username: str = ""
+    password: str = ""
     try:
         credentials = json.loads(sys.stdin.read())
         username = str(credentials["username"])
@@ -254,6 +262,7 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
             from school_api import create_school_session, get_student_id
 
             if scenario == "warm":
+
                 @contextlib.contextmanager
                 def forbid_browser_login(*_args: object, **_kwargs: object):
                     raise WarmCacheMissBrowserError("warm cache miss: browser login forbidden")
@@ -292,8 +301,13 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
         # messages, URLs, or response content.
         reason = getattr(exc, "reason", None)
         if isinstance(reason, str) and reason in {
-            "credential", "page_load", "waf_blocked", "captcha", "token_extract",
-            "login_page_changed", "unknown",
+            "credential",
+            "page_load",
+            "waf_blocked",
+            "captcha",
+            "token_extract",
+            "login_page_changed",
+            "unknown",
         }:
             result["error_reason"] = reason
     finally:
@@ -301,7 +315,8 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
             close = getattr(session, "close", None)
             if close:
                 close()
-        username = password = credentials = None
+        username = password = ""
+        credentials = None
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["ok"] else 1
 
@@ -352,7 +367,7 @@ def _run_scenario(
         start_new_session=True,
     )
     payload = json.dumps({"username": username, "password": password}, ensure_ascii=False)
-    peak: dict[str, object] = {
+    peak: _PeakRecord = {
         "peak_tree_rss_kib": 0,
         "peak_process_rss_kib": 0,
         "sample_count": 0,
@@ -395,12 +410,12 @@ def _run_scenario(
         result.update(
             {
                 "wall_clock_seconds": round(elapsed, 4),
-                "peak_tree_rss_kib": int(peak["peak_tree_rss_kib"]),
-                "peak_process_rss_kib": int(peak["peak_process_rss_kib"]),
-                "browser_process_count": len(peak["browser_pids"]),  # type: ignore[arg-type]
+                "peak_tree_rss_kib": peak["peak_tree_rss_kib"],
+                "peak_process_rss_kib": peak["peak_process_rss_kib"],
+                "browser_process_count": len(peak["browser_pids"]),
                 "sample_interval_ms": int(SAMPLE_INTERVAL_SECONDS * 1000),
-                "sample_count": int(peak["sample_count"]),
-                "observed_process_count": len(peak["observed_pids"]),  # type: ignore[arg-type]
+                "sample_count": peak["sample_count"],
+                "observed_process_count": len(peak["observed_pids"]),
             }
         )
     return result

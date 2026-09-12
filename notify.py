@@ -1,16 +1,16 @@
 import base64
-from contextlib import contextmanager
 import hashlib
 import hmac
 import logging
 import os
 import time
 import urllib.parse
+from collections.abc import Callable
+from contextlib import contextmanager
 
 import requests
 
 import config
-
 
 logger = logging.getLogger("swu.notify")
 
@@ -230,10 +230,7 @@ def send_qywx(key, title, content, session=None, *, deadline=None, clock=None):
 def send_bark(key, url, title, content, session=None, *, deadline=None, clock=None):
     def operation(client):
         base_url = url.rstrip("/") if url else "https://api.day.app"
-        request_url = (
-            f"{base_url}/{key}/{urllib.parse.quote(str(title))}/"
-            f"{urllib.parse.quote(str(content))}"
-        )
+        request_url = f"{base_url}/{key}/{urllib.parse.quote(str(title))}/{urllib.parse.quote(str(content))}"
         timeout = _request_timeout(deadline, clock)
         if timeout is None:
             return False
@@ -307,7 +304,9 @@ def _retry_after_seconds(body):
     if isinstance(value, bool):
         return None
     try:
-        delay = float(value)
+        # ``value`` comes from untrusted JSON; ``str`` keeps the conversion
+        # total so non-numeric payloads raise inside the guard below.
+        delay = float(str(value))
     except (TypeError, ValueError):
         return None
     if delay != delay or delay in (float("inf"), float("-inf")):
@@ -349,9 +348,7 @@ def _send_telegram_chunk(
         if _http_ok(response) and body is not None and body.get("ok") is True:
             return True
 
-        is_rate_limited = status == 429 or (
-            isinstance(body, dict) and body.get("error_code") == 429
-        )
+        is_rate_limited = status == 429 or (isinstance(body, dict) and body.get("error_code") == 429)
         if not is_rate_limited or retries >= TELEGRAM_MAX_RETRIES:
             return False
 
@@ -383,12 +380,9 @@ def send_telegram(
     """Send plain-text Telegram messages using the official Bot API."""
     token = "" if bot_token is None else str(bot_token).strip()
     normalized_chat_id = chat_id.strip() if isinstance(chat_id, str) else chat_id
-    if not token or normalized_chat_id is None or (
-        isinstance(normalized_chat_id, str) and not normalized_chat_id
-    ):
+    if not token or normalized_chat_id is None or (isinstance(normalized_chat_id, str) and not normalized_chat_id):
         logger.warning(
-            "Telegram 推送配置不完整：需同时设置 "
-            "PUSH_TELEGRAM_BOT_TOKEN 和 PUSH_TELEGRAM_CHAT_ID，跳过请求。"
+            "Telegram 推送配置不完整：需同时设置 PUSH_TELEGRAM_BOT_TOKEN 和 PUSH_TELEGRAM_CHAT_ID，跳过请求。"
         )
         return False
 
@@ -417,7 +411,7 @@ def _env_value(name):
     return os.getenv(name, "").strip()
 
 
-_PUSH_SENDERS = {
+_PUSH_SENDERS: dict[str, Callable[..., bool]] = {
     "DingTalk": send_dingtalk,
     "WeChat Work": send_qywx,
     "Bark": send_bark,
@@ -435,7 +429,7 @@ def _channel_arguments(channel, title, content):
     # Every sender takes its table values followed by the common title/body.
     # This keeps registration data in config.py and avoids another credential
     # list in this module.
-    return values + (title, content)
+    return (*values, title, content)
 
 
 def send_push(title, content, session=None, *, clock=None, sleep_func=None):
@@ -453,13 +447,10 @@ def send_push(title, content, session=None, *, clock=None, sleep_func=None):
         if not all(present):
             if channel.name == "Telegram":
                 logger.warning(
-                    "Telegram 推送配置不完整：需同时设置 "
-                    "PUSH_TELEGRAM_BOT_TOKEN 和 PUSH_TELEGRAM_CHAT_ID，跳过请求。"
+                    "Telegram 推送配置不完整：需同时设置 PUSH_TELEGRAM_BOT_TOKEN 和 PUSH_TELEGRAM_CHAT_ID，跳过请求。"
                 )
             else:
-                missing = [
-                    name for name, value in zip(channel.required_env, present) if not value
-                ]
+                missing = [name for name, value in zip(channel.required_env, present, strict=True) if not value]
                 logger.warning(
                     "%s 推送配置不完整，缺少 %s，跳过请求。",
                     channel.menu_label,
@@ -470,16 +461,16 @@ def send_push(title, content, session=None, *, clock=None, sleep_func=None):
         if sender is None:
             logger.warning("未找到%s推送实现，跳过请求。", channel.menu_label)
             continue
-        channels.append((
-            channel.menu_label,
-            sender,
-            _channel_arguments(channel, title, content),
-        ))
+        channels.append(
+            (
+                channel.menu_label,
+                sender,
+                _channel_arguments(channel, title, content),
+            )
+        )
 
     if not channels:
-        logger.info(
-            "未配置任何推送通道 (如 PUSH_DINGTALK_TOKEN, PUSH_BARK_KEY 等)，跳过推送。"
-        )
+        logger.info("未配置任何推送通道 (如 PUSH_DINGTALK_TOKEN, PUSH_BARK_KEY 等)，跳过推送。")
         return False
 
     client = session

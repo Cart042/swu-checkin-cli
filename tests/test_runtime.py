@@ -41,9 +41,7 @@ class RuntimeResourceTests(unittest.TestCase):
             with mock.patch.dict(sys.modules, {"ddddocr": fake_module}):
                 results = []
                 threads = [
-                    threading.Thread(
-                        target=lambda: results.append(get_info.classify_captcha(b"ABCD"))
-                    )
+                    threading.Thread(target=lambda: results.append(get_info.classify_captcha(b"ABCD")))
                     for _ in range(8)
                 ]
                 for thread in threads:
@@ -80,8 +78,9 @@ class RuntimeResourceTests(unittest.TestCase):
                 raise AssertionError("a failed acquire must not release")
 
         semaphore = NeverAvailableSemaphore()
-        with mock.patch.object(get_info, "_browser_login_semaphore", semaphore), mock.patch.object(
-            get_info, "_remaining_seconds", return_value=0.25
+        with (
+            mock.patch.object(get_info, "_browser_login_semaphore", semaphore),
+            mock.patch.object(get_info, "_remaining_seconds", return_value=0.25),
         ):
             with self.assertRaises(get_info.DeadlineExceeded):
                 get_info._acquire_browser_login(deadline=123.0)
@@ -97,16 +96,19 @@ class RuntimeResourceTests(unittest.TestCase):
             calls.append(username)
             return 10 if calls.count(username) == 1 else 0
 
-        with mock.patch.dict(
-            os.environ,
-            {
-                "SWU_MAX_WORKERS": "2",
-                "SWU_MAX_ROUNDS": "2",
-                "SWU_RETRY_INTERVAL_SECONDS": "1",
-                "SWU_RUN_DEADLINE_SECONDS": "30",
-            },
-            clear=False,
-        ), mock.patch.object(runner, "ThreadPoolExecutor", wraps=runner.ThreadPoolExecutor) as executor:
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SWU_MAX_WORKERS": "2",
+                    "SWU_MAX_ROUNDS": "2",
+                    "SWU_RETRY_INTERVAL_SECONDS": "1",
+                    "SWU_RUN_DEADLINE_SECONDS": "30",
+                },
+                clear=False,
+            ),
+            mock.patch.object(runner, "ThreadPoolExecutor", wraps=runner.ThreadPoolExecutor) as executor,
+        ):
             summary, exit_code, results = runner.run_accounts(
                 [{"username": "alice", "password": "pw"}],
                 checkin_func=checkin,

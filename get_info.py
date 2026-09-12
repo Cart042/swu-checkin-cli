@@ -1,25 +1,26 @@
-import json
-import requests
-import urllib.parse
-import re
-import threading
-import logging
-import sys
-import os
 import hashlib
+import json
+import logging
+import os
+import re
+import sys
+import threading
 import time
+import urllib.parse
 from contextlib import contextmanager
 
-from cache import _token_cache_lock, load_cached_token, save_cached_token
+import requests
+
+from cache import load_cached_token, save_cached_token
 from school_api import (
     DeadlineExceeded,
     SwuBusinessError,
     SwuRequestError,
     TokenInvalidError,
     _api_json as _school_api_json,
-    _remaining_seconds,
     _redact_text as _school_redact_text,
     _redact_url as _school_redact_url,
+    _remaining_seconds,
     _timeout_with_deadline,
     check_school_connectivity,
     create_school_session,
@@ -28,6 +29,17 @@ from school_api import (
     get_transition_today,
     request_with_retry,
 )
+
+# get_info 是历史上的登录门面：调用方与测试仍从这里导入传输层名字。
+__all__ = [
+    "check_school_connectivity",
+    "create_school_session",
+    "get_dormitory",
+    "get_student_id",
+    "get_transition_today",
+    "request_with_retry",
+]
+
 
 class SafeStreamHandler(logging.StreamHandler):
     def emit(self, record):
@@ -45,6 +57,7 @@ class SafeStreamHandler(logging.StreamHandler):
             self.flush()
         except Exception:
             self.handleError(record)
+
 
 logger = logging.getLogger("swu")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,24 +79,22 @@ def setup_logging():
         "INFO": logging.INFO,
         "WARNING": logging.WARNING,
         "ERROR": logging.ERROR,
-        "CRITICAL": logging.CRITICAL
+        "CRITICAL": logging.CRITICAL,
     }
     level = levels.get(log_level_str, logging.INFO)
-    
+
     root_logger = logging.getLogger()
     for h in list(root_logger.handlers):
         root_logger.removeHandler(h)
-        
+
     root_logger.setLevel(level)
-    
-    formatter = logging.Formatter(
-        fmt="[%(asctime)s] [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    
+
+    formatter = logging.Formatter(fmt="[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
     handler = SafeStreamHandler(sys.stdout)
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
+
 
 _ocr_init_lock = threading.Lock()
 _ocr_classification_lock = threading.Lock()
@@ -174,7 +185,7 @@ def save_login_debug_artifacts(page, username, reason, error=None):
             "input#validateCode, input[name=IDToken3]",
             "button:has-text(登录), input[type=submit]",
         )
-        selector_state = {}
+        selector_state: dict[str, bool | None] = {}
         for selector in selectors:
             try:
                 selector_state[selector] = bool(page.locator(selector).count())
@@ -262,7 +273,9 @@ def recover_from_idm_error_page(page, username, timeout, recovery_url=None, dead
     try:
         _remaining_seconds(deadline)
         if recovery_url:
-            response = page.goto(recovery_url, wait_until="domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
+            response = page.goto(
+                recovery_url, wait_until="domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline)
+            )
             status = _http_status(response)
             if status is not None and status >= 400:
                 logger.warning(
@@ -296,7 +309,10 @@ def recover_from_idm_error_page(page, username, timeout, recovery_url=None, dead
         return True
     except Exception as exc:
         save_login_debug_artifacts(page, username, "idm_error_recovery_failed", exc)
-        raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
+        raise LoginError(
+            "login_page_changed",
+            f"统一认证验证失败后无法返回登录页面: {_redact_text(exc)}",
+        ) from None
 
 
 def click_username_password_tab(page, username, timeout, deadline=None):
@@ -313,11 +329,15 @@ def click_username_password_tab(page, username, timeout, deadline=None):
 
 
 def login_name_locator(page):
-    return page.locator('input#loginName, input[name="IDToken1"], input[placeholder*="用户名"], input[placeholder*="账号"]').first
+    return page.locator(
+        'input#loginName, input[name="IDToken1"], input[placeholder*="用户名"], input[placeholder*="账号"]'
+    ).first
 
 
 def password_locator(page):
-    return page.locator('input#password, input[name="IDToken2"], input[type="password"], input[placeholder*="密码"]').first
+    return page.locator(
+        'input#password, input[name="IDToken2"], input[type="password"], input[placeholder*="密码"]'
+    ).first
 
 
 def captcha_locator(page):
@@ -332,11 +352,7 @@ def route_login_resource(route):
         route.abort()
     elif res_type == "image":
         # 仅保留验证码图片和登录按钮图片，拦截其他非必要图片
-        if (
-            "kaptchaImage" in url
-            or "unified_button" in url
-            or urllib.parse.urlsplit(url).path == "/am/validate.code"
-        ):
+        if "kaptchaImage" in url or "unified_button" in url or urllib.parse.urlsplit(url).path == "/am/validate.code":
             route.continue_()
         else:
             route.abort()
@@ -358,12 +374,14 @@ def get_captcha_image_bytes(page, captcha_el, timeout, deadline=None):
     except Exception as exc:
         # A captcha that never renders is a captcha problem, not an unknown
         # browser failure: keep the exit code and the diagnostic precise.
-        raise LoginError("captcha", f"验证码图片未加载完成: {_redact_text(exc)}")
+        raise LoginError("captcha", f"验证码图片未加载完成: {_redact_text(exc)}") from None
     return captcha_el.screenshot(timeout=_browser_timeout_ms(timeout, deadline))
 
 
 def captcha_input_locator(page):
-    return page.locator('input#validateCode, input[name="IDToken3"], input[placeholder*="验证码"], input[placeholder*="校验码"]').first
+    return page.locator(
+        'input#validateCode, input[name="IDToken3"], input[placeholder*="验证码"], input[placeholder*="校验码"]'
+    ).first
 
 
 def submit_button_locator(page):
@@ -400,9 +418,7 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
             _redact_url(page.url),
         )
         last_http_status = _remember_http_status(
-            recover_from_idm_error_page(
-                page, username, timeout, recovery_url=recovery_url, deadline=deadline
-            ),
+            recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url, deadline=deadline),
             last_http_status,
         )
         click_username_password_tab(page, username, timeout, deadline=deadline)
@@ -436,9 +452,7 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
             )
 
         last_http_status = _remember_http_status(
-            recover_from_idm_error_page(
-                page, username, timeout, recovery_url=recovery_url, deadline=deadline
-            ),
+            recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url, deadline=deadline),
             last_http_status,
         )
         click_username_password_tab(page, username, timeout, deadline=deadline)
@@ -474,6 +488,7 @@ def classify_captcha(image_bytes):
     with _ocr_classification_lock:
         return get_ocr().classification(image_bytes)
 
+
 def _browser_timeout_ms(timeout, deadline):
     """Convert the per-operation timeout to milliseconds without crossing deadline."""
     bounded = _timeout_with_deadline(timeout, deadline)
@@ -495,8 +510,7 @@ _PLATFORM_UA_TOKENS = {
     "win32": "Windows NT 10.0; Win64; x64",
 }
 _FALLBACK_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 
@@ -622,7 +636,7 @@ def _absolute_redirect_target(response, location):
     base = getattr(response, "url", "") or ""
     target = urllib.parse.urljoin(base, location) if base else location
     if target.startswith("http://"):
-        target = "https://" + target[len("http://"):]
+        target = "https://" + target[len("http://") :]
     return target
 
 
@@ -684,6 +698,7 @@ def _recover_blocked_oauth_hop(
 
 _load_cached_token = load_cached_token
 _save_cached_token = save_cached_token
+
 
 def _find_query_value_from_url(url, key):
     parsed = urllib.parse.urlparse(url)
@@ -831,9 +846,7 @@ _LOGIN_ERROR_MESSAGE_JS = """() => {
     return Array.from(seen).join('\\n');
 }"""
 
-_LOGIN_ERROR_MESSAGE_SELECTOR = (
-    ".pop .ctnTxt, .error, #error, .errorMessage, #errorMessage, .messager-body"
-)
+_LOGIN_ERROR_MESSAGE_SELECTOR = ".pop .ctnTxt, .error, #error, .errorMessage, #errorMessage, .messager-body"
 
 # Some rejections are rendered as ordinary page text instead of the dialog
 # node, so a bounded excerpt around a failure-specific phrase is used as a
@@ -874,9 +887,7 @@ def read_login_error_message(page, timeout, deadline=None):
     if message:
         return message
     try:
-        body_text = page.locator("body").inner_text(
-            timeout=min(2000, _browser_timeout_ms(timeout, deadline))
-        )
+        body_text = page.locator("body").inner_text(timeout=min(2000, _browser_timeout_ms(timeout, deadline)))
     except Exception:
         return ""
     if not isinstance(body_text, str):
@@ -913,7 +924,8 @@ def exchange_token_from_browser_page(page, ticket, timeout, deadline=None):
     try:
         result = page.evaluate(
             """async ({ ticket, timeoutMs }) => {
-            const url = `/gateway/fighter-middle/api/integrate/uaap/cas/exchange-token?token=${encodeURIComponent(ticket)}&remember=true`;
+            const url = `/gateway/fighter-middle/api/integrate/uaap/cas/exchange-token`
+                + `?token=${encodeURIComponent(ticket)}&remember=true`;
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeoutMs);
             try {
@@ -1049,7 +1061,7 @@ def _load_login_entry(page, username, entry_url, timeout, deadline=None):
         except Exception as exc:
             _remaining_seconds(deadline)
             if attempt == 2:
-                raise LoginError("page_load", f"登录页加载失败或超时: {_redact_text(exc)}")
+                raise LoginError("page_load", f"登录页加载失败或超时: {_redact_text(exc)}") from None
             logger.warning(
                 "账号 %s: 页面加载失败 (第 %s 次尝试): %s。正在重新载入...",
                 _debug_user_id(username),
@@ -1097,13 +1109,12 @@ def _submit_login_form(
             if isinstance(recovery_status, int):
                 raise LoginError(
                     "page_load",
-                    f"填写登录表单失败且认证页面返回 HTTP {recovery_status}: "
-                    f"{_redact_text(exc, [username, password])}",
-                )
+                    f"填写登录表单失败且认证页面返回 HTTP {recovery_status}: {_redact_text(exc, [username, password])}",
+                ) from None
             raise LoginError(
                 "login_page_changed",
                 f"填写登录表单失败: {_redact_text(exc, [username, password])}",
-            )
+            ) from None
 
         # Capture captcha image bytes
         captcha_el = captcha_locator(page)
@@ -1138,13 +1149,10 @@ def _submit_login_form(
         login_status = None
         try:
             with page.expect_response(
-                lambda response: getattr(response.request, "method", "") == "POST"
-                and "/am/UI/Login" in response.url,
+                lambda response: getattr(response.request, "method", "") == "POST" and "/am/UI/Login" in response.url,
                 timeout=min(5000, _browser_timeout_ms(timeout, deadline)),
             ) as login_response:
-                submit_button_locator(page).click(
-                    timeout=_browser_timeout_ms(timeout, deadline)
-                )
+                submit_button_locator(page).click(timeout=_browser_timeout_ms(timeout, deadline))
             login_status = _http_status(login_response.value)
             redirect_target = _absolute_redirect_target(
                 login_response.value,
@@ -1199,9 +1207,10 @@ def _submit_login_form(
             # A rejected password login surfaces as the same generic text, so
             # keep it out of the captcha bucket and let the user check the
             # credentials instead.
-            if any(k in error_msg for k in ["密码", "账户", "用户名", "动态口令", "不正确"]):
-                if "验证码" not in error_msg:
-                    raise LoginError("credential", f"账号或密码错误: {safe_error_msg}")
+            if any(k in error_msg for k in ["密码", "账户", "用户名", "动态口令", "不正确"]) and (
+                "验证码" not in error_msg
+            ):
+                raise LoginError("credential", f"账号或密码错误: {safe_error_msg}") from None
 
         if "验证码" in error_msg:
             confirm = page.locator(".pop .confirm").first
@@ -1326,9 +1335,7 @@ def get_token(
                     timeout if redirect_target else min(5, timeout),
                     deadline=deadline,
                 )
-                hop_accepted = redirect_target is not None or (
-                    login_status is not None and 300 <= login_status < 400
-                )
+                hop_accepted = redirect_target is not None or (login_status is not None and 300 <= login_status < 400)
                 if not redirected and hop_accepted:
                     # The login response looked accepted, so re-drive the hop
                     # even when it carried no usable Location.
@@ -1375,13 +1382,9 @@ def get_token(
                     recovery_url=entry_url,
                     wait_for_result=wait_for_entry_result,
                 )
-                logger.debug(
-                    "账号 %s: 正在通过门户入口获取 Token...", _debug_user_id(username)
-                )
+                logger.debug("账号 %s: 正在通过门户入口获取 Token...", _debug_user_id(username))
                 _load_login_entry(page, username, cas_url, timeout, deadline)
-                if not _wait_for_login_result(
-                    page, login_entry_url, timeout, deadline=deadline
-                ):
+                if not _wait_for_login_result(page, login_entry_url, timeout, deadline=deadline):
                     # The CAS session did not carry over, or the portal asked
                     # for credentials again: sign in here as before.
                     _submit_login_form(
@@ -1450,7 +1453,10 @@ def get_token(
                 body_text = ""
             save_login_debug_artifacts(page, username, "unexpected_browser_error", e)
             if "动态口令验证失败" in body_text or "验证失败" in body_text:
-                raise LoginError("login_page_changed", f"统一认证错误页未能恢复到登录表单: {_redact_text(e, [username, password])}")
-            raise LoginError("unknown", f"获取令牌失败: {_redact_text(e, [username, password])}")
+                raise LoginError(
+                    "login_page_changed",
+                    f"统一认证错误页未能恢复到登录表单: {_redact_text(e, [username, password])}",
+                ) from None
+            raise LoginError("unknown", f"获取令牌失败: {_redact_text(e, [username, password])}") from None
         finally:
             browser.close()

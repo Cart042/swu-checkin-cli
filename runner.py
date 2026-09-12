@@ -15,13 +15,29 @@ def _configured_max_workers(account_count, logger=None, *, options=None):
     return max(1, min(configured, max(1, account_count)))
 
 
-def _run_one_account(index, account, total_accounts, force_login, checkin_func, deadline, status_messages, logger, deadline_exception):
+def _run_one_account(
+    index,
+    account,
+    total_accounts,
+    force_login,
+    checkin_func,
+    deadline,
+    status_messages,
+    logger,
+    deadline_exception,
+):
     username = account["username"]
     password = account["password"]
     logger.info("[%s/%s] 开始为账号 %s 执行签到...", index, total_accounts, username)
     try:
         result = checkin_func(username, password, force_login=force_login, deadline=deadline)
-        logger.info("[%s/%s] 账号 %s 签到结果: %s", index, total_accounts, username, status_messages.get(result, "未知状态"))
+        logger.info(
+            "[%s/%s] 账号 %s 签到结果: %s",
+            index,
+            total_accounts,
+            username,
+            status_messages.get(result, "未知状态"),
+        )
         return index, username, result, None
     except deadline_exception as exc:
         logger.error("[%s/%s] 账号 %s 达到 deadline：%s", index, total_accounts, username, exc)
@@ -196,7 +212,7 @@ def run_accounts(
     deadline_seconds = runtime_options.run_deadline_seconds
     overall_deadline = clock() + deadline_seconds
     pending_accounts = list(accounts)
-    final_results = {}
+    final_results: dict[str, tuple[str, bool, int]] = {}
 
     logger.info("并发执行：最大线程数 = %s", max_workers)
     logger.info("失败账号最多重试 %s 轮，运行 deadline=%s 秒。", max_rounds, deadline_seconds)

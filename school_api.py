@@ -13,7 +13,6 @@ import urllib.parse
 
 import requests
 
-
 logger = logging.getLogger("swu")
 
 
@@ -70,8 +69,7 @@ def _redact_url(url):
         parsed = urllib.parse.urlsplit(str(url))
         query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         safe_query = [
-            (key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else value)
-            for key, value in query_pairs
+            (key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else value) for key, value in query_pairs
         ]
         fragment_pairs = urllib.parse.parse_qsl(parsed.fragment, keep_blank_values=True)
         safe_fragment = (
@@ -165,10 +163,7 @@ def _timeout_with_deadline(timeout, deadline):
     if timeout is None:
         return remaining
     if isinstance(timeout, (tuple, list)):
-        return tuple(
-            min(float(value), remaining) if value is not None else remaining
-            for value in timeout
-        )
+        return tuple(min(float(value), remaining) if value is not None else remaining for value in timeout)
     try:
         return min(float(timeout), remaining)
     except (TypeError, ValueError):
@@ -232,13 +227,13 @@ def request_with_retry(
                 if status is not None:
                     try:
                         status = int(status)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as exc:
                         raise SwuRequestError(
                             f"{method_upper} {_redact_url(url)} 返回无效 HTTP 状态码",
                             method=method_upper,
                             url=_redact_url(url),
                             response=response,
-                        )
+                        ) from exc
                     if not 200 <= status < 300:
                         error = _http_status_error(method_upper, url, status, response)
                         if retryable and status in _RETRYABLE_HTTP_STATUS and attempt < attempts:
@@ -302,9 +297,7 @@ def _api_json(response, endpoint):
             response=response,
         )
     if code is not None and code not in _SUCCESS_CODES:
-        raise SwuBusinessError(
-            f"{endpoint} 返回业务错误：code={code!r}, message={_redact_text(message_text)}"
-        )
+        raise SwuBusinessError(f"{endpoint} 返回业务错误：code={code!r}, message={_redact_text(message_text)}")
     return body
 
 
@@ -316,7 +309,7 @@ def _session_student_cache(session):
         cache = getattr(session, "_swu_student_id_cache", None)
         if cache is None:
             cache = {}
-            setattr(session, "_swu_student_id_cache", cache)
+            session._swu_student_id_cache = cache
         return cache if isinstance(cache, dict) else None
     except Exception:
         # Some test doubles or custom sessions disallow arbitrary attributes;
@@ -414,13 +407,13 @@ def get_transition_today(token, timeout=10, session=None, deadline=None):
 
 __all__ = [
     "DeadlineExceeded",
+    "SwuBusinessError",
     "SwuRequestError",
     "TokenInvalidError",
-    "SwuBusinessError",
-    "create_school_session",
     "check_school_connectivity",
-    "request_with_retry",
-    "get_student_id",
+    "create_school_session",
     "get_dormitory",
+    "get_student_id",
     "get_transition_today",
+    "request_with_retry",
 ]

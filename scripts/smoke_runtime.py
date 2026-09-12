@@ -13,7 +13,6 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
-
 # This image was generated locally with Pillow using the text ``1234``.  It
 # contains no account, school, or other user data and keeps the smoke test
 # independent of fonts installed by a particular Linux image.
@@ -26,12 +25,14 @@ _EXPECTED_CAPTCHA_TEXT = "1234"
 class _LocalPageHandler(BaseHTTPRequestHandler):
     """Serve one deterministic page and reject anything else."""
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+    def do_GET(self) -> None:
         if self.path != "/":
             self.send_error(404)
             return
-        body = b"<!doctype html><html><head><title>runtime smoke</title></head>" \
+        body = (
+            b"<!doctype html><html><head><title>runtime smoke</title></head>"
             b"<body><main id='ready'>Chromium runtime ready</main></body></html>"
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

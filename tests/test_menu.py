@@ -10,9 +10,7 @@ import menu
 
 class MenuOfflineTests(unittest.TestCase):
     def test_add_account_writes_validated_users_file(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "builtins.input", return_value="new-user"
-        ):
+        with tempfile.TemporaryDirectory() as directory, mock.patch("builtins.input", return_value="new-user"):
             menu.menu_add_account(directory, prompt_password_func=lambda _label: "pass")
             self.assertEqual(
                 json.loads(Path(directory, "users.json").read_text(encoding="utf-8")),
@@ -26,9 +24,11 @@ class MenuOfflineTests(unittest.TestCase):
         self.assertIn("配置目录", rendered)
 
     def test_push_menu_uses_shared_channel_registration(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
-            os.environ, {}, clear=True
-        ), mock.patch("builtins.input", side_effect=["1", "ding-token", "ding-secret"]):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("builtins.input", side_effect=["1", "ding-token", "ding-secret"]),
+        ):
             menu.menu_set_push(directory)
             values = Path(directory, ".env").read_text(encoding="utf-8")
             self.assertIn("PUSH_DINGTALK_TOKEN=", values)

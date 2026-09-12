@@ -17,7 +17,7 @@ from school_api import (
     SwuBusinessError,
     SwuRequestError,
     TokenInvalidError,
-    check_school_connectivity,
+    check_school_connectivity,  # noqa: F401 - 运行时边界的兼容导出
     create_school_session,
     get_dormitory,
     get_student_id,
@@ -27,6 +27,7 @@ from school_api import (
 from status import LOGIN_REASON_STATUS, STATUS_MESSAGES
 
 logger = logging.getLogger("swu.check_in")
+
 
 def _api_body(response, endpoint):
     """Decode an API body and turn malformed payloads into business failures."""
@@ -150,7 +151,8 @@ def checkin_post(token, timeout, session, transition_today, deadline=None):
         body = _api_body(response, "签到提交接口")
         code = body.get("code")
         if code is not None and code not in {0, 200, 1100, "0", "200", "1100"}:
-            raise SwuBusinessError(f"签到提交接口返回业务失败：code={code!r}, message={body.get('msg', body.get('message', ''))}")
+            message = body.get("msg", body.get("message", ""))
+            raise SwuBusinessError(f"签到提交接口返回业务失败：code={code!r}, message={message}")
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
         logger.warning("签到写请求结果未知，先查询今日状态，不重复提交：%s", exc)
         try:
@@ -174,15 +176,10 @@ def checkin_post(token, timeout, session, transition_today, deadline=None):
 
 
 def _same_checked_in_record(candidate, submitted_record):
-    if (
-        not isinstance(candidate, dict)
-        or not isinstance(submitted_record, dict)
-        or candidate.get("qdzt") != "已签到"
-    ):
+    if not isinstance(candidate, dict) or not isinstance(submitted_record, dict) or candidate.get("qdzt") != "已签到":
         return False
-    return (
-        str(candidate.get("id")) == str(submitted_record.get("id"))
-        and str(candidate.get("formId")) == str(submitted_record.get("formId"))
+    return str(candidate.get("id")) == str(submitted_record.get("id")) and str(candidate.get("formId")) == str(
+        submitted_record.get("formId")
     )
 
 
