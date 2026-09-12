@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import config
+from swu_checkin import config
 
 
 class ConfigResolutionTests(unittest.TestCase):

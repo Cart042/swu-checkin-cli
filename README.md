@@ -29,9 +29,9 @@ git clone https://github.com/Cart042/swu-checkin-cli.git
 cd swu-checkin-cli
 python3.11 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 python -m playwright install --with-deps --only-shell chromium
-python check_in.py -m
+swu-checkin -m
 ```
 
 菜单会引导你添加一个或多个账号。也可以手动复制示例文件：
@@ -44,14 +44,26 @@ cp .env.example .env
 先检查配置和依赖：
 
 ```bash
-python check_in.py --check-config
+swu-checkin --check-config
 ```
 
 `--check-config` 只检查本地账号、依赖、缓存和推送配置，不会访问学校网络。需要手动诊断网络时再运行：
 
 ```bash
-python check_in.py --check-network
+swu-checkin --check-network
 ```
+
+### 命令行入口
+
+实现位于 `src/swu_checkin/` 包中，下面三种方式运行的是同一份代码：
+
+| 入口 | 适用场景 |
+| --- | --- |
+| `swu-checkin` | 安装后（`pip install -e .` 或 `pip install .`）的正式入口。 |
+| `python -m swu_checkin` | 已安装、但不想依赖源码目录里的兼容脚本时使用。 |
+| `python check_in.py` | 源码检出目录里的兼容入口；Docker 镜像和已有部署脚本继续使用它。 |
+
+`SWU_CONFIG_DIR` 未设置时，源码检出会使用仓库根目录，兼容入口与包内代码解析出的配置目录完全一致。从 wheel 安装到 `site-packages` 时默认使用当前工作目录，因此部署环境建议显式设置 `SWU_CONFIG_DIR`（Docker 镜像使用 `/data`）。
 
 ## 账号配置
 
@@ -79,12 +91,12 @@ python check_in.py --check-network
 ]
 ```
 
-默认配置目录是脚本所在目录；Docker 中是 `/data`。账号文件、`.env`、Token 缓存和运行锁都应只保存在本地或挂载的数据目录，不要提交到仓库。
+默认配置目录是仓库根目录（wheel 安装时是当前工作目录）；Docker 中是 `/data`。账号文件、`.env`、Token 缓存和运行锁都应只保存在本地或挂载的数据目录，不要提交到仓库。
 
 ## 数字菜单
 
 ```bash
-python check_in.py -m
+swu-checkin -m
 ```
 
 菜单可以：
@@ -217,16 +229,20 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 ```text
 .
 ├── .github/workflows       # 定时、手动和离线 PR 检查
-├── check_in.py             # CLI、配置检查、运行锁和结果汇总
-├── checkin_service.py      # 单账号签到流程和签到业务状态
-├── status.py               # CLI 与签到服务共用的状态码文本
-├── config.py               # 账号来源、校验、dotenv 和本地配置文件
-├── menu.py                 # 数字配置菜单
-├── get_info.py             # 浏览器登录、验证码和 Token
-├── cache.py                # Token 缓存读写
-├── school_api.py           # 学校 HTTP 会话、请求和接口数据
-├── notify.py               # 推送渠道
-├── runner.py               # 多账号并发、重试和汇总
+├── check_in.py             # 兼容入口，等价于 swu-checkin / python -m swu_checkin
+├── pyproject.toml          # 项目元数据、Ruff 与 mypy 配置
+├── src/swu_checkin/
+│   ├── cli.py              # CLI、配置检查、运行锁和结果汇总
+│   ├── config.py           # 账号来源、校验、dotenv 和本地配置文件
+│   ├── menu.py             # 数字配置菜单
+│   ├── status.py           # CLI 与签到服务共用的状态码文本
+│   ├── checkin_service.py  # 单账号签到流程和签到业务状态
+│   ├── runner.py           # 多账号并发、重试和汇总
+│   ├── notify.py           # 推送渠道
+│   ├── cache.py            # Token 缓存读写
+│   ├── login.py            # 浏览器登录、验证码和 Token
+│   ├── atomic_io.py        # 私有配置文件的原子写入
+│   └── api/school.py       # 学校 HTTP 会话、请求和接口数据
 ├── scripts/smoke_runtime.py # 本地 Chromium + ddddocr 运行时冒烟检查
 ├── scripts/profile_login.py # 交互式只读登录和缓存性能测量（不执行签到）
 ├── docs/performance.md      # 性能测量方法、限制和安全说明
@@ -255,7 +271,6 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 本地开发使用与运行环境一致的 Python 3.11 或 3.12：
 
 ```bash
-python -m pip install -r requirements.txt
 python -m pip install -e ".[dev,test]"
 ```
 
@@ -264,7 +279,7 @@ python -m pip install -e ".[dev,test]"
 ```bash
 ruff check .
 ruff format --check .
-python -m unittest discover -s tests
+python -m unittest discover -s tests -t .
 ```
 
 类型检查使用宽松设置，只保证已有代码不引入新的类型错误：

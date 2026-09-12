@@ -3,7 +3,7 @@ import os
 import unittest
 from unittest import mock
 
-import notify
+from swu_checkin import notify
 
 
 class FakeResponse:

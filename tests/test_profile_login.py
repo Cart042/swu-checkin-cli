@@ -87,8 +87,8 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
                     process.stdout.close()
 
     def test_warm_cache_miss_forbids_browser_fallback(self):
-        fake_get_info = types.ModuleType("get_info")
-        fake_school_api = types.ModuleType("school_api")
+        fake_get_info = types.ModuleType("swu_checkin.login")
+        fake_school_api = types.ModuleType("swu_checkin.api.school")
         session = _FakeSession()
         fake_get_info._browser_login_slot = object()
         fake_get_info._browser_playwright = object()
@@ -105,7 +105,13 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
         output = io.StringIO()
         with (
             tempfile.TemporaryDirectory() as config_dir,
-            mock.patch.dict(sys.modules, {"get_info": fake_get_info, "school_api": fake_school_api}),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "swu_checkin.login": fake_get_info,
+                    "swu_checkin.api.school": fake_school_api,
+                },
+            ),
             mock.patch.object(
                 profile_login.sys,
                 "stdin",
@@ -136,16 +142,22 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
 
         for reason in ("page_load", "sensitive response text", ["not a string"]):
             with self.subTest(reason=reason):
-                fake_login = types.ModuleType("get_info")
+                fake_login = types.ModuleType("swu_checkin.login")
                 fake_login.get_token = mock.Mock(side_effect=LoginFailure(reason))
-                fake_api = types.ModuleType("school_api")
+                fake_api = types.ModuleType("swu_checkin.api.school")
                 session = _FakeSession()
                 fake_api.create_school_session = mock.Mock(return_value=session)
                 fake_api.get_student_id = mock.Mock()
                 output = io.StringIO()
                 with (
                     tempfile.TemporaryDirectory() as directory,
-                    mock.patch.dict(sys.modules, {"get_info": fake_login, "school_api": fake_api}),
+                    mock.patch.dict(
+                        sys.modules,
+                        {
+                            "swu_checkin.login": fake_login,
+                            "swu_checkin.api.school": fake_api,
+                        },
+                    ),
                     mock.patch.dict(os.environ),
                     mock.patch.object(
                         profile_login.sys,

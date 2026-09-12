@@ -9,11 +9,10 @@ from unittest import mock
 
 from dotenv import dotenv_values
 
-import check_in
-import checkin_service
-import config
-import menu
-import school_api
+from swu_checkin import checkin_service, cli as check_in, config, menu
+from swu_checkin.api import school as school_api
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class CheckInOfflineTests(unittest.TestCase):
@@ -156,8 +155,8 @@ class CheckInOfflineTests(unittest.TestCase):
 
     def test_help_does_not_require_browser_dependencies(self):
         result = subprocess.run(
-            [sys.executable, "-S", "check_in.py", "--help"],
-            cwd=Path(check_in.__file__).parent,
+            [sys.executable, "-S", str(REPO_ROOT / "check_in.py"), "--help"],
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
         )

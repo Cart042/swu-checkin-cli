@@ -15,9 +15,30 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from atomic_io import atomic_write_text
+from .atomic_io import atomic_write_text
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _default_base_dir() -> str:
+    """Return the directory that holds ``users.json`` and ``.env``.
+
+    The historical flat layout resolved this to the repository root because
+    every module lived there.  The package now lives in ``src/swu_checkin``,
+    so the same directory is derived from the ``src`` layout instead.  Wheel
+    installs land in ``site-packages``, which is not writable user space, and
+    fall back to the working directory; deployments should set
+    ``SWU_CONFIG_DIR`` explicitly (the Docker image uses ``/data``).
+    """
+
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(package_dir)
+    if os.path.basename(parent_dir) == "src":
+        return os.path.dirname(parent_dir)
+    if os.path.basename(parent_dir) in {"site-packages", "dist-packages"}:
+        return os.getcwd()
+    return package_dir
+
+
+BASE_DIR = _default_base_dir()
 CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
 
 logger = logging.getLogger("swu.config")

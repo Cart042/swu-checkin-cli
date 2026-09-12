@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import atomic_io
+from swu_checkin import atomic_io
 
 
 class AtomicWriteTextTests(unittest.TestCase):

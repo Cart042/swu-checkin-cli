@@ -10,7 +10,7 @@ from contextlib import contextmanager
 
 import requests
 
-import config
+from . import config
 
 logger = logging.getLogger("swu.notify")
 

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import menu
+from swu_checkin import menu
 
 
 class MenuOfflineTests(unittest.TestCase):

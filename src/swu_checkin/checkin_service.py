@@ -11,8 +11,7 @@ import time
 
 import requests
 
-from get_info import get_token
-from school_api import (
+from .api.school import (
     DeadlineExceeded,
     SwuBusinessError,
     SwuRequestError,
@@ -24,7 +23,8 @@ from school_api import (
     get_transition_today,
     request_with_retry,
 )
-from status import LOGIN_REASON_STATUS, STATUS_MESSAGES
+from .login import get_token
+from .status import LOGIN_REASON_STATUS, STATUS_MESSAGES
 
 logger = logging.getLogger("swu.check_in")
 

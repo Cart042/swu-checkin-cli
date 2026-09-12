@@ -11,8 +11,7 @@ from contextlib import contextmanager
 
 import requests
 
-from cache import load_cached_token, save_cached_token
-from school_api import (
+from .api.school import (
     DeadlineExceeded,
     SwuBusinessError,
     SwuRequestError,
@@ -29,8 +28,10 @@ from school_api import (
     get_transition_today,
     request_with_retry,
 )
+from .cache import load_cached_token, save_cached_token
+from .config import BASE_DIR
 
-# get_info 是历史上的登录门面：调用方与测试仍从这里导入传输层名字。
+# 登录门面继续导出它转发使用的传输层名字：调用方与测试按这一处导入即可。
 __all__ = [
     "check_school_connectivity",
     "create_school_session",
@@ -60,7 +61,6 @@ class SafeStreamHandler(logging.StreamHandler):
 
 
 logger = logging.getLogger("swu")
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
 
 

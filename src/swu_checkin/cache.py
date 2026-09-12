@@ -1,7 +1,7 @@
 """Small, private Token cache used by the SWU login facade.
 
 The cache intentionally owns only persistence concerns.  Token validation stays
-in :mod:`school_api`: callers must validate a candidate before calling
+in :mod:`swu_checkin.api.school`: callers must validate a candidate before calling
 ``save_cached_token``.  File writes are atomic and use restrictive permissions
 because the cache contains bearer credentials.
 """
@@ -10,7 +10,7 @@ import json
 import os
 import threading
 
-from atomic_io import atomic_write_text
+from .atomic_io import atomic_write_text
 
 _token_cache_lock = threading.Lock()
 

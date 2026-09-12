@@ -4,7 +4,7 @@ import logging
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-import config
+from . import config
 
 
 def _configured_max_workers(account_count, logger=None, *, options=None):

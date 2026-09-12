@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import errno
 import getpass
+import importlib
 import io
 import json
 import math
@@ -25,9 +26,25 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# 与 check_in.py / tests/__init__.py 使用同一份源码路径引导。
+SRC_DIR = REPO_ROOT / "src"
+
+
+def _import_module(name: str) -> Any:
+    """Import *name* through ``sys.modules``.
+
+    Importing by name keeps the offline tests able to substitute
+    ``types.ModuleType`` doubles for the login and school-API modules.  The
+    return type is intentionally untyped: the worker patches private login
+    attributes that only exist at runtime.
+    """
+
+    return importlib.import_module(name)
+
+
 SAMPLE_INTERVAL_SECONDS = 0.05
 MAX_TIMEOUT_SECONDS = 300.0
 
@@ -253,13 +270,18 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
     try:
         os.environ["SWU_CONFIG_DIR"] = config_dir
         os.environ["SWU_LOG_LEVEL"] = "CRITICAL"
-        sys.path.insert(0, str(REPO_ROOT))
-        # Import after SWU_CONFIG_DIR is set: get_info resolves its cache path
-        # when imported.  No check-in, leave/change, or notification module is
-        # imported by this worker.
+        sys.path.insert(0, str(SRC_DIR))
+        # Import after SWU_CONFIG_DIR is set: the login facade resolves its
+        # cache path when imported.  No check-in, leave/change, or notification
+        # module is imported by this worker.
         with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
-            import get_info
-            from school_api import create_school_session, get_student_id
+            # ``import_module`` consults ``sys.modules`` directly, so the
+            # offline tests can substitute both modules without touching the
+            # real package attributes.
+            get_info = _import_module("swu_checkin.login")
+            school_api = _import_module("swu_checkin.api.school")
+            create_school_session = school_api.create_school_session
+            get_student_id = school_api.get_student_id
 
             if scenario == "warm":
 

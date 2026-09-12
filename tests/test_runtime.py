@@ -8,8 +8,7 @@ import types
 import unittest
 from unittest import mock
 
-import get_info
-import runner
+from swu_checkin import login as get_info, runner
 
 
 class RuntimeResourceTests(unittest.TestCase):

@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import get_info
+from swu_checkin import login as get_info
 
 
 class FakeResponse:
