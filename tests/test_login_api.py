@@ -321,7 +321,26 @@ class LoginApiOfflineTests(unittest.TestCase):
         )
         empty = mock.Mock()
         empty.evaluate.return_value = ""
+        # The static "用户名密码" tab must not be mistaken for a failure hint.
+        empty.locator.return_value.inner_text.return_value = "用户名密码 登录"
         self.assertEqual(get_info.read_login_error_message(empty, 5), "")
+
+    def test_login_error_message_reader_falls_back_to_page_text(self):
+        # Some rejections are plain page text; the reader must still surface a
+        # bounded excerpt instead of reporting "no error at all".
+        page = mock.Mock()
+        page.evaluate.return_value = ""
+        page.locator.return_value.inner_text.return_value = (
+            "统一认证 验证失败。动态口令验证失败 返回至登录页面"
+        )
+        text = get_info.read_login_error_message(page, 5)
+        self.assertIn("验证失败", text)
+        self.assertLess(len(text), 120)
+
+        quiet = mock.Mock()
+        quiet.evaluate.return_value = ""
+        quiet.locator.return_value.inner_text.return_value = "用户名密码 登录"
+        self.assertEqual(get_info.read_login_error_message(quiet, 5), "")
 
     def test_direct_login_surface_and_configuration_are_removed(self):
         source = Path(get_info.__file__).read_text(encoding="utf-8")

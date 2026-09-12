@@ -835,6 +835,21 @@ _LOGIN_ERROR_MESSAGE_SELECTOR = (
     ".pop .ctnTxt, .error, #error, .errorMessage, #errorMessage, .messager-body"
 )
 
+# Some rejections are rendered as ordinary page text instead of the dialog
+# node, so a bounded excerpt around a failure-specific phrase is used as a
+# fallback.  The hints stay narrow on purpose: static labels on the form, such
+# as the "用户名密码" tab, must not look like an error message.
+_LOGIN_FAILURE_HINTS = (
+    "验证失败",
+    "动态口令验证失败",
+    "用户名或密码",
+    "密码错误",
+    "密码不正确",
+    "账号已被",
+    "锁定",
+    "不正确",
+)
+
 
 def read_login_error_message(page, timeout, deadline=None):
     """Return the visible failure text the login page is showing, if any.
@@ -853,9 +868,24 @@ def read_login_error_message(page, timeout, deadline=None):
         except Exception:
             pass
     try:
-        return page.evaluate(_LOGIN_ERROR_MESSAGE_JS) or ""
+        message = (page.evaluate(_LOGIN_ERROR_MESSAGE_JS) or "").strip()
+    except Exception:
+        message = ""
+    if message:
+        return message
+    try:
+        body_text = page.locator("body").inner_text(
+            timeout=min(2000, _browser_timeout_ms(timeout, deadline))
+        )
     except Exception:
         return ""
+    if not isinstance(body_text, str):
+        return ""
+    for hint in _LOGIN_FAILURE_HINTS:
+        index = body_text.find(hint)
+        if index >= 0:
+            return body_text[max(0, index - 40) : index + 60].strip()
+    return ""
 
 
 def _validate_and_cache_token(username, token, cache_path, timeout, session, deadline):
