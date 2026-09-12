@@ -254,6 +254,10 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 | `10` | 学校接口返回异常 |
 | `11` | Token 校验失败或已失效 |
 
+状态码在 `src/swu_checkin/status.py` 中以 `CheckinStatus` 枚举定义，登录失败原因
+（`FailureReason`）到状态码的映射也在同一处维护；这些数值保持向后兼容，
+脚本和推送内容可以直接按整数判断。
+
 ## 文件结构
 
 ```text
