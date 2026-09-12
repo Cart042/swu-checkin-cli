@@ -59,6 +59,24 @@ class PackagingMetadataTests(unittest.TestCase):
         self.assertIn('python-version: ["3.11", "3.12"]', workflow)
         self.assertIn(f'"{requires_python.removeprefix(">=")}"', workflow)
 
+    @unittest.skipUnless(PR_CI_WORKFLOW.is_file(), "只有仓库检出才带 CI 工作流")
+    def test_ci_check_tools_match_the_declared_dev_versions(self):
+        # ruff / mypy 在 CI 里是按写死的版本安装的，而本地开发装的是 pyproject
+        # 的 dev 附加依赖。两边漂移时会出现「本地绿、CI 红」或者反过来，而且
+        # Dependabot 只会改其中一边，所以在这里锁死。
+        dev = project_metadata()["project"]["optional-dependencies"]["dev"]
+        pinned = {}
+        for spec in dev:
+            name, separator, version = spec.partition("==")
+            if separator:
+                pinned[name] = version
+        self.assertEqual(sorted(pinned), ["mypy", "ruff"])
+
+        workflow = PR_CI_WORKFLOW.read_text(encoding="utf-8")
+        for name, version in sorted(pinned.items()):
+            with self.subTest(tool=name):
+                self.assertIn(f'"{name}=={version}"', workflow)
+
     def test_every_documented_test_command_works_from_a_clean_checkout(self):
         # 实现位于 src/，因此 `unittest discover` 必须带 `-t .`（tests 作为包
         # 被导入时才会把 src 加进 sys.path）。这条用例防止文档和 CI 再次写错。

@@ -34,7 +34,9 @@ jobs:
             pyproject.toml
 
       - name: Install Ruff
-        run: python -m pip install --disable-pip-version-check "ruff==0.14.4"
+        # 版本必须与 pyproject.toml 的 dev 附加依赖一致，否则本地与 CI 会用
+        # 不同版本的检查工具；tests/test_packaging.py 会守住这一点。
+        run: python -m pip install --disable-pip-version-check "ruff==0.16.6"
 
       - name: Lint
         run: ruff check --output-format=github .
@@ -61,7 +63,7 @@ jobs:
 
       - name: Install mypy
         run: |
-          python -m pip install --disable-pip-version-check "mypy==1.18.2" "types-requests>=2.32.0"
+          python -m pip install --disable-pip-version-check "mypy==2.3.1" "types-requests>=2.32.0"
 
       - name: Type check
         run: mypy
