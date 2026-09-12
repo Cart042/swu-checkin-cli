@@ -8,7 +8,7 @@
 | `.github/ISSUE_TEMPLATE/config.yml` | GitHub Issue 模板配置。 |
 | `.github/ISSUE_TEMPLATE/feature_request.yml` | GitHub 功能建议模板。 |
 | `.github/PULL_REQUEST_TEMPLATE.md` | Pull Request 模板，提醒说明变更、验证和敏感信息检查。 |
-| `.github/workflows/swu-check.yml` | GitHub Actions 定时和手动签到工作流，使用缓存的 Python 依赖和 Chromium headless shell 登录；手动调试开关启用时上传短期保留的脱敏文本 artifact。 |
+| `.github/workflows/swu-check.yml` | GitHub Actions 签到工作流，使用缓存的 Python 依赖和 Chromium headless shell 登录；定时触发只在仓库变量 `SWU_CHECKIN_ENABLED=true` 时才打卡（开关未开启时直接跳过），手动触发不受限制；手动调试开关启用时上传短期保留的脱敏文本 artifact。 |
 | `.github/workflows/pr-ci.yml` | Pull Request 检查，分为 Ruff 检查、mypy 类型检查、Python 3.11/3.12 离线单元测试和运行时冒烟四个 job；公开仓库只在 GitHub 托管 runner 上运行，不访问学校网站。 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签时的发布流程：校验标签与 `pyproject.toml` 版本一致、构建 sdist/wheel、创建 GitHub Release 并推送 GHCR 镜像。 |
 | `.github/workflows/runtime-smoke.yml` | 每天定时（也可手动触发）在完整运行时依赖下跑 Chromium + ddddocr 冒烟检查和 `check_in.py --help`，覆盖依赖与 runner 镜像漂移。 |

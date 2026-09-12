@@ -120,7 +120,23 @@ swu-checkin -m
 - `PUSH_TELEGRAM_BOT_TOKEN`（可选）
 - `PUSH_TELEGRAM_CHAT_ID`（可选）
 
-工作流保留每天北京时间 21:05 的定时触发、手动触发和并发保护。手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
+### 定时打卡需要显式开启
+
+每天北京时间 21:05 的定时触发**默认不会打卡**，必须先手动打开仓库变量开关：
+
+```bash
+# 开启每日自动打卡
+gh variable set SWU_CHECKIN_ENABLED --body true
+
+# 关闭每日自动打卡
+gh variable delete SWU_CHECKIN_ENABLED
+```
+
+也可以在 **Settings → Secrets and variables → Actions → Variables** 里添加或删除同名变量。开关未打开时，定时运行会直接跳过：不登录学校系统、不使用任何凭据、也不会提交打卡，Actions 列表里只会留下一条 `skipped` 记录。
+
+这样做的原因是 GitHub 会在仓库长期不活跃后自动停用定时工作流（本项目就发生过：`main` 从 6 月 30 日起没有提交，定时打卡在 8 月 29 日被停掉）。开关状态保存在仓库里，可以随时用 `gh variable list` 确认，不会像工作流的启用状态那样被单方面改变。把定时打卡当作心跳也有额外好处：如果哪天连 `skipped` 记录都没有了，说明定时触发本身出了问题。
+
+手动触发**不受开关限制**，任何时候都可以用 `gh workflow run swu-check.yml` 或 Actions 页面的 **Run workflow** 补一次打卡。手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
 
 工作流使用 Python 3.11、浏览器登录和 Chromium headless shell。网络或登录页偶发异常时，优先手动重跑，再下载调试 artifact 查看页面结构变化。登录链路的已知失败特征、设备 Cookie 规则和失败原因对照见 [docs/login-troubleshooting.md](docs/login-troubleshooting.md)。
 
