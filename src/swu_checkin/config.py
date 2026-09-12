@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .atomic_io import atomic_write_text
+from .models import Account
 
 
 def _default_base_dir() -> str:
@@ -164,7 +165,7 @@ PUSH_CHANNELS = (
 class AccountResolution:
     """Result of resolving one account source in priority order."""
 
-    accounts: list[dict[str, str]]
+    accounts: list[Account]
     source: str | None = None
     errors: tuple[str, ...] = ()
 
@@ -283,7 +284,7 @@ def _atomic_write_text(path: str, content: str, mode: int = 0o600) -> None:
     atomic_write_text(path, content, mode=mode, prefix=".swu-write-")
 
 
-def validate_accounts(accounts) -> list[dict[str, str]]:
+def validate_accounts(accounts) -> list[Account]:
     """Validate, normalize, and de-duplicate an account list.
 
     Usernames are stripped for matching; passwords are opaque and keep their
@@ -293,7 +294,7 @@ def validate_accounts(accounts) -> list[dict[str, str]]:
     if not isinstance(accounts, list):
         raise ValueError("账号配置必须是 JSON 数组格式（List）")
 
-    validated: list[dict[str, str]] = []
+    validated: list[Account] = []
     seen_usernames: set[str] = set()
     for idx, account in enumerate(accounts, 1):
         if not isinstance(account, dict):
@@ -323,7 +324,7 @@ def validate_accounts(accounts) -> list[dict[str, str]]:
     return validated
 
 
-def load_users_file(config_dir: str | os.PathLike[str] | None = None) -> list[dict[str, str]]:
+def load_users_file(config_dir: str | os.PathLike[str] | None = None) -> list[Account]:
     path = users_config_path(config_dir)
     if not os.path.exists(path):
         return []

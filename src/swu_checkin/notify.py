@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import requests
 
 from . import config
+from .models import NotificationResult
 
 logger = logging.getLogger("swu.notify")
 
@@ -433,7 +434,12 @@ def _channel_arguments(channel, title, content):
 
 
 def send_push(title, content, session=None, *, clock=None, sleep_func=None):
-    """Send through every configured channel and return whether one succeeded."""
+    """Send through every configured channel and summarize the outcome.
+
+    ``NotificationResult`` 在布尔语境中等价于“是否至少有一个通道成功”，
+    因此既有的 ``if send_push(...)`` 用法不需要修改；需要排查时还可以读取
+    ``channels`` / ``failed``。
+    """
     effective_clock = _effective_clock(clock)
     effective_sleep = _effective_sleep(sleep_func)
     push_deadline = effective_clock() + _configured_push_deadline_seconds(logger)
@@ -471,11 +477,13 @@ def send_push(title, content, session=None, *, clock=None, sleep_func=None):
 
     if not channels:
         logger.info("未配置任何推送通道 (如 PUSH_DINGTALK_TOKEN, PUSH_BARK_KEY 等)，跳过推送。")
-        return False
+        return NotificationResult(sent=False, failed=())
 
     client = session
     owns_session = session is None
     sent = False
+    succeeded_channels: list[str] = []
+    failed_channels: list[str] = []
     try:
         if client is None:
             client = _new_direct_session()
@@ -503,8 +511,10 @@ def send_push(title, content, session=None, *, clock=None, sleep_func=None):
             if succeeded:
                 logger.info("%s推送成功", channel_name)
                 sent = True
+                succeeded_channels.append(channel_name)
             else:
                 logger.error("%s推送失败", channel_name)
+                failed_channels.append(channel_name)
     except Exception:
         logger.error("推送会话初始化失败")
     finally:
@@ -516,4 +526,8 @@ def send_push(title, content, session=None, *, clock=None, sleep_func=None):
 
     if not sent:
         logger.warning("推送配置存在，但发送失败。")
-    return sent
+    return NotificationResult(
+        sent=sent,
+        channels=tuple(succeeded_channels),
+        failed=tuple(failed_channels),
+    )

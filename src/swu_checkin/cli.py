@@ -20,15 +20,29 @@ import time
 from . import config
 
 # ``LOGIN_REASON_STATUS`` 仍然从本模块导出，历史调用方按旧路径导入它。
-from .status import LOGIN_REASON_STATUS, STATUS_MESSAGES  # noqa: F401
+from .status import (  # noqa: F401 - LOGIN_REASON_STATUS 继续从本模块导出
+    LOGIN_REASON_STATUS,
+    STATUS_MESSAGES,
+    CheckinStatus,
+)
 
 BASE_DIR = config.BASE_DIR
 # Kept as a public setting for deployments and callers that override it.
 CONFIG_DIR = config.CONFIG_DIR
 logger = logging.getLogger("swu.check_in")
 
-RETRYABLE_STATUSES = {4, 6, 10, 11}
-TERMINAL_SUCCESS_STATUSES = {0, 1, 2, 5}
+RETRYABLE_STATUSES = {
+    CheckinStatus.CONNECTION_ERROR,
+    CheckinStatus.PAGE_LOAD_FAILED,
+    CheckinStatus.SCHOOL_API_ERROR,
+    CheckinStatus.TOKEN_INVALID,
+}
+TERMINAL_SUCCESS_STATUSES = {
+    CheckinStatus.NO_TASK,
+    CheckinStatus.SUCCESS,
+    CheckinStatus.ALREADY_CHECKED_IN,
+    CheckinStatus.ON_LEAVE,
+}
 
 
 def _resolve_accounts(cli_username=None, cli_password=None):

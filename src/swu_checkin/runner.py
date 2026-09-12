@@ -5,6 +5,8 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from . import config
+from .models import Account, CheckinResult
+from .status import CheckinStatus, coerce_status
 
 
 def _configured_max_workers(account_count, logger=None, *, options=None):
@@ -41,10 +43,10 @@ def _run_one_account(
         return index, username, result, None
     except deadline_exception as exc:
         logger.error("[%s/%s] 账号 %s 达到 deadline：%s", index, total_accounts, username, exc)
-        return index, username, 4, str(exc)
+        return index, username, CheckinStatus.CONNECTION_ERROR, str(exc)
     except Exception as exc:
         logger.error("[%s/%s] 账号 %s 签到执行异常：%s", index, total_accounts, username, exc)
-        return index, username, 10, str(exc)
+        return index, username, CheckinStatus.SCHOOL_API_ERROR, str(exc)
 
 
 def _run_batch(
@@ -108,12 +110,18 @@ def _run_batch(
             try:
                 _, user, result, error = future.result()
             except Exception as exc:
-                user, result, error = username, 10, str(exc)
+                user, result, error = username, CheckinStatus.SCHOOL_API_ERROR, str(exc)
                 logger.error("线程执行异常 (%s): %s", username, exc)
 
             status_message = f"执行异常：{error}" if error else status_messages.get(result, "未知状态")
             is_ok = result in terminal_success_statuses and not error
-            final_results[user] = (status_message, is_ok, attempt)
+            final_results[user] = CheckinResult(
+                username=user,
+                status=coerce_status(result),
+                message=status_message,
+                ok=is_ok,
+                attempt=attempt,
+            )
             if not is_ok and result in retryable_statuses and attempt < max_rounds and clock() < deadline:
                 pending_accounts.append(account)
             elif not is_ok and result not in retryable_statuses:
@@ -178,14 +186,14 @@ def _run_rounds(
 
 
 def run_accounts(
-    accounts,
+    accounts: list[Account],
     *,
     force_login=False,
     checkin_func,
     validate_accounts,
-    status_messages,
-    retryable_statuses,
-    terminal_success_statuses,
+    status_messages: dict[CheckinStatus | int, str],
+    retryable_statuses: set[CheckinStatus],
+    terminal_success_statuses: set[CheckinStatus],
     deadline_exception=Exception,
     sleep_func=time.sleep,
     clock=time.monotonic,
@@ -212,7 +220,7 @@ def run_accounts(
     deadline_seconds = runtime_options.run_deadline_seconds
     overall_deadline = clock() + deadline_seconds
     pending_accounts = list(accounts)
-    final_results: dict[str, tuple[str, bool, int]] = {}
+    final_results: dict[str, CheckinResult] = {}
 
     logger.info("并发执行：最大线程数 = %s", max_workers)
     logger.info("失败账号最多重试 %s 轮，运行 deadline=%s 秒。", max_rounds, deadline_seconds)
@@ -245,16 +253,21 @@ def run_accounts(
             reason = "达到本次运行 deadline，未完成"
         else:
             reason = f"达到最大重试轮数 {max_rounds}，未完成"
-        final_results[username] = (reason, False, min(attempt, max_rounds))
+        final_results[username] = CheckinResult(
+            username=username,
+            message=reason,
+            ok=False,
+            attempt=min(attempt, max_rounds),
+        )
 
-    success_count = sum(1 for _, is_ok, _ in final_results.values() if is_ok)
+    success_count = sum(1 for result in final_results.values() if result.ok)
     failed_count = len(accounts) - success_count
     summary_content = f"打卡执行完毕！成功: {success_count} 个，失败: {failed_count} 个。"
     summary_content += f"\n总轮次: {min(attempt, max_rounds)} 轮。\n\n打卡详情:"
     for username in sorted(final_results):
-        status, is_ok, done_attempt = final_results[username]
-        icon = "✅" if is_ok else "❌"
-        retry_note = f"（第 {done_attempt} 轮完成）" if done_attempt > 1 else ""
-        summary_content += f"\n{icon} 账号 {username}: {status}{retry_note}"
+        result = final_results[username]
+        icon = "✅" if result.ok else "❌"
+        retry_note = f"（第 {result.attempt} 轮完成）" if result.attempt > 1 else ""
+        summary_content += f"\n{icon} 账号 {username}: {result.message}{retry_note}"
     logger.info("\n%s", summary_content)
     return summary_content, (0 if failed_count == 0 else 1), final_results

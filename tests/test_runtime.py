@@ -10,6 +10,7 @@ from unittest import mock
 
 from swu_checkin import runner
 from swu_checkin.auth import browser, captcha
+from swu_checkin.status import CheckinStatus
 
 
 class RuntimeResourceTests(unittest.TestCase):
@@ -112,15 +113,18 @@ class RuntimeResourceTests(unittest.TestCase):
                 [{"username": "alice", "password": "pw"}],
                 checkin_func=checkin,
                 validate_accounts=validate,
-                status_messages={0: "ok", 10: "temporary"},
-                retryable_statuses={10},
-                terminal_success_statuses={0},
+                status_messages={
+                    CheckinStatus.NO_TASK: "ok",
+                    CheckinStatus.SCHOOL_API_ERROR: "temporary",
+                },
+                retryable_statuses={CheckinStatus.SCHOOL_API_ERROR},
+                terminal_success_statuses={CheckinStatus.NO_TASK},
                 sleep_func=lambda _seconds: None,
             )
 
         self.assertEqual(executor.call_count, 1)
         self.assertEqual(exit_code, 0)
-        self.assertTrue(results["alice"][1])
+        self.assertTrue(results["alice"].ok)
         self.assertIn("总轮次: 2 轮", summary)
 
 

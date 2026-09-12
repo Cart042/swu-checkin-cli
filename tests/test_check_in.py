@@ -261,7 +261,7 @@ class CheckInOfflineTests(unittest.TestCase):
             )
             self.assertEqual(exit_code, 0)
             self.assertIn("成功: 1 个，失败: 0 个", summary)
-            self.assertEqual(results["alice"][1], True)
+            self.assertTrue(results["alice"].ok)
             self.assertEqual(len(calls), 2)
         finally:
             for key, value in original.items():
@@ -322,7 +322,7 @@ class CheckInOfflineTests(unittest.TestCase):
         self.assertEqual(calls.count("temporary"), 2)
         self.assertEqual(calls.count("stable"), 1)
         self.assertIn("失败: 0 个", summary)
-        self.assertTrue(results["temporary"][1])
+        self.assertTrue(results["temporary"].ok)
 
     def test_runner_deadline_produces_nonzero_summary(self):
         ticks = [0]
@@ -345,7 +345,7 @@ class CheckInOfflineTests(unittest.TestCase):
                 clock=clock,
             )
         self.assertEqual(exit_code, 1)
-        self.assertFalse(results["late"][1])
+        self.assertFalse(results["late"].ok)
         self.assertIn("deadline", summary)
 
     def test_atomic_write_uses_private_mode(self):
