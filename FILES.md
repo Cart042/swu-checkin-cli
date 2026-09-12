@@ -48,12 +48,20 @@
 | `scripts/profile_login.py` | 交互式只读登录和 Token 缓存性能测量；通过标准输入接收凭据，仅输出脱敏的阶段耗时和进程资源摘要，不执行签到或推送。 |
 | `docs/performance.md` | 性能测量命令、采样口径、凭据安全和当前环境限制说明。 |
 | `docs/login-troubleshooting.md` | 统一认证链路的已知失败特征、设备 Cookie 规则、可调开关与登录失败原因对照。 |
+| `docs/branch-protection.md` | `main` 分支保护（Ruleset）的建议规则、应用命令和验证方式。 |
 | `tests/__init__.py` | 测试包引导：把 `src` 加入 `sys.path`，让未安装的检出目录也能运行同一份代码。 |
 | `tests/fixtures/login/` | 脱敏登录页、跳转地址、`exchange-token` 响应、`localStorage` 与 Cookie 样本，用于回归选择器与分类逻辑。 |
 | `tests/test_login_fixtures.py` | 用脱敏样本驱动登录链解析与分类的回归测试，不访问网络。 |
 | `tests/test_check_in.py` | 不访问网络的签到、配置和重试边界测试。 |
 | `tests/test_config.py` | 账号优先级、dotenv 加载和配置错误测试。 |
 | `tests/test_menu.py` | 不访问网络的菜单文件操作测试。 |
-| `tests/test_login_api.py` | 不访问网络的登录、Token 缓存和 API 请求边界测试。 |
+| `tests/test_login_flow.py` | 登录状态机（入口、跳转恢复、OAuth 补跳与缓存回退）的离线回归测试。 |
+| `tests/test_auth_browser.py` | 浏览器层（UA、定位器、登录表单与错误提示）的离线回归测试。 |
+| `tests/test_auth_cookies.py` | CAS 跳转遗留设备 Cookie 精确清除的离线回归测试。 |
+| `tests/test_auth_tokens.py` | Token 提取、CAS ticket 交换与缓存边界的离线回归测试。 |
+| `tests/test_auth_errors.py` | 登录失败分类与可重试 HTTP 错误的离线回归测试。 |
+| `tests/test_auth_urls.py` | 登录跳转地址解析的离线回归测试。 |
+| `tests/test_school_api.py` | 学校接口传输层（代理、重试、身份缓存）的离线回归测试。 |
+| `tests/test_cache.py` | Token 缓存持久化（权限、原子写与 JSON 结构）的离线回归测试。 |
 | `tests/test_notify.py` | 不访问网络的推送渠道、Telegram 分段和重试边界测试。 |
 | `users.json.example` | 多账号配置格式示例，不包含真实凭据。 |
