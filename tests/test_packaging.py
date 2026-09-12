@@ -1,6 +1,7 @@
 """打包元数据的一致性检查：版本号、控制台脚本与包布局。"""
 
 import importlib
+import re
 import tomllib
 import unittest
 from pathlib import Path
@@ -52,6 +53,27 @@ class PackagingMetadataTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "pr-ci.yml").read_text(encoding="utf-8")
         self.assertIn('python-version: ["3.11", "3.12"]', workflow)
         self.assertIn(f'"{requires_python.removeprefix(">=")}"', workflow)
+
+    def test_every_documented_test_command_works_from_a_clean_checkout(self):
+        # 实现位于 src/，因此 `unittest discover` 必须带 `-t .`（tests 作为包
+        # 被导入时才会把 src 加进 sys.path）。这条用例防止文档和 CI 再次写错。
+        targets = [REPO_ROOT / "README.md"]
+        targets += sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+        commands = []
+        for path in targets:
+            for command in re.findall(r"unittest discover[^\n`]*", path.read_text(encoding="utf-8")):
+                commands.append((path.name, command))
+        self.assertTrue(commands, "没有找到任何 unittest discover 命令")
+        for name, command in commands:
+            with self.subTest(path=name, command=command):
+                self.assertIn("-t .", command)
+
+    def test_container_keeps_the_non_root_runtime_and_compatibility_entry(self):
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("USER 10001:10001", dockerfile)
+        # 非 root 用户必须能在共享路径找到 Chromium。
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright", dockerfile)
+        self.assertIn('CMD ["python", "check_in.py"]', dockerfile)
 
 
 if __name__ == "__main__":
