@@ -25,7 +25,8 @@ concurrency:
 
 jobs:
   check-in:
-    runs-on: ubuntu-latest
+    # 官方仓库使用专用的 self-hosted runner；fork 自动回退到 GitHub-hosted runner。
+    runs-on: ${{ github.repository == 'Cart042/swu-checkin-cli' && 'swu-checkin' || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
       TZ: Asia/Shanghai
