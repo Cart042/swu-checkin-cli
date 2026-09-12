@@ -1,0 +1,15 @@
+# sdist 应该是一份可以自测的仓库快照。
+# setuptools 默认只带 tests/test*.py，不会带 tests/fixtures/；少了样本目录，
+# 发布出去的源码包里 fixture 回归测试必然失败，因此显式补齐。
+include check_in.py
+include requirements.txt
+include FILES.md
+graft docs
+graft scripts
+graft tests
+
+# 运行时不需要的中间产物。
+prune tests/__pycache__
+prune scripts/__pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store

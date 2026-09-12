@@ -10,6 +10,10 @@ import swu_checkin
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
+# 这两个文件只存在于仓库检出里，不会进 sdist；发布出去的源码包仍然要能跑测试，
+# 所以依赖它们的仓库级断言在 sdist 中跳过。
+PR_CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pr-ci.yml"
+DOCKERFILE = REPO_ROOT / "Dockerfile"
 
 
 def project_metadata():
@@ -44,13 +48,14 @@ class PackagingMetadataTests(unittest.TestCase):
                 module = importlib.import_module(name)
                 self.assertTrue(module.__file__)
 
+    @unittest.skipUnless(PR_CI_WORKFLOW.is_file(), "只有仓库检出才带 CI 工作流")
     def test_ci_matrix_covers_the_declared_python_versions(self):
         # README 与 pyproject 声明 3.11+，CI 必须真的跑这两个版本，
         # 否则兼容性声明没有证据。
         requires_python = project_metadata()["project"]["requires-python"]
         self.assertEqual(requires_python, ">=3.11")
 
-        workflow = (REPO_ROOT / ".github" / "workflows" / "pr-ci.yml").read_text(encoding="utf-8")
+        workflow = PR_CI_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('python-version: ["3.11", "3.12"]', workflow)
         self.assertIn(f'"{requires_python.removeprefix(">=")}"', workflow)
 
@@ -68,12 +73,39 @@ class PackagingMetadataTests(unittest.TestCase):
             with self.subTest(path=name, command=command):
                 self.assertIn("-t .", command)
 
+    @unittest.skipUnless(DOCKERFILE.is_file(), "只有仓库检出才带 Dockerfile")
     def test_container_keeps_the_non_root_runtime_and_compatibility_entry(self):
-        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
         self.assertIn("USER 10001:10001", dockerfile)
         # 非 root 用户必须能在共享路径找到 Chromium。
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright", dockerfile)
         self.assertIn('CMD ["python", "check_in.py"]', dockerfile)
+
+    def test_sdist_manifest_keeps_the_repo_self_testable(self):
+        # setuptools 默认只把 tests/test*.py 放进 sdist，不会带 tests/fixtures/，
+        # 那样发布出去的源码包里 fixture 回归测试必然失败。MANIFEST.in 保证
+        # sdist 仍然是一份能直接跑测试的仓库快照。
+        manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        for pattern in (
+            "include check_in.py",
+            "include requirements.txt",
+            "graft docs",
+            "graft scripts",
+            "graft tests",
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertIn(pattern, manifest)
+
+        # 这些路径必须真实存在，否则 MANIFEST.in 只是空挂一条规则。
+        for relative in (
+            "check_in.py",
+            "requirements.txt",
+            "tests/fixtures/login/idm_login_form.html",
+            "docs/branch-protection.md",
+            "scripts/smoke_runtime.py",
+        ):
+            with self.subTest(path=relative):
+                self.assertTrue((REPO_ROOT / relative).is_file())
 
 
 if __name__ == "__main__":
