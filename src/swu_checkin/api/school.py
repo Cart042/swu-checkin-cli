@@ -318,11 +318,14 @@ def _session_student_cache(session):
 
 
 def get_student_id(token, timeout=10, session=None, deadline=None):
-    """Validate *token* and return its student ID.
+    """Validate *token* and return the account identifier behind it.
 
     When a caller reuses one session, a successful identity response is kept
     in memory for that session.  This lets token validation performed by login
     serve the immediately following check-in without a duplicate API call.
+
+    The unified-auth ``subject.username`` is the account identifier (the account
+    name used at login), not necessarily a student number.
     """
     _remaining_seconds(deadline)
     cache = _session_student_cache(session)
@@ -352,7 +355,7 @@ def get_student_id(token, timeout=10, session=None, deadline=None):
     except (KeyError, TypeError) as exc:
         raise SwuBusinessError(f"用户信息接口返回结构异常: {exc}") from exc
     if not isinstance(student_id, (str, int)) or isinstance(student_id, bool) or not str(student_id):
-        raise SwuBusinessError("用户信息接口返回的学号无效")
+        raise SwuBusinessError("用户信息接口返回的账号标识无效")
     student_id = str(student_id)
     if cache is not None:
         try:
