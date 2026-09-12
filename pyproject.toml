@@ -82,6 +82,10 @@ known-first-party = [
 
 [tool.mypy]
 python_version = "3.11"
+# 运行目标是 Linux（Docker 镜像与 GitHub Actions），固定 platform 让本地 macOS
+# 检查与 CI 结果一致：否则 ``sys.platform != "linux"`` 这类守卫会被判定为常量真，
+# 其后整段函数都会被当成不可达而跳过检查。
+platform = "linux"
 files = [
     "check_in.py",
     "src",

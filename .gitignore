@@ -1,5 +1,9 @@
 __pycache__/
 *.py[cod]
+# 打包产物：python -m build / pip wheel 会生成，不应进入版本库。
+build/
+dist/
+*.egg-info/
 .DS_Store
 .ruff_cache/
 .mypy_cache/

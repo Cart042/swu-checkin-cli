@@ -492,7 +492,7 @@ def main() -> int:
     finally:
         # Drop references to credentials before the temporary cache directory
         # is removed.  No credential is ever written to that directory.
-        username = password = None
+        username = password = ""
         temporary_dir.cleanup()
 
 
