@@ -965,6 +965,271 @@ def exchange_token_from_browser_page(page, ticket, timeout, deadline=None):
     return None
 
 
+# Login entries.  ``ywtb`` starts from the school's 一网通办 portal the way a
+# user does and then lets the portal entry finish from that CAS session;
+# ``portal`` keeps the previous single-entry behaviour.
+_YWTB_ENTRY_URL = "https://ywtb.swu.edu.cn/"
+_DEFAULT_LOGIN_ENTRY = "ywtb"
+
+# Credentials are always entered on these hosts; leaving them means the entry
+# has finished authenticating.
+_CREDENTIAL_HOSTS = ("idm.swu.edu.cn", "uaaap.swu.edu.cn")
+
+_LEFT_CREDENTIAL_HOSTS_JS = """() => {
+    const host = (window.location.hostname || '').toLowerCase();
+    if (!host) {
+        return false;
+    }
+    return !host.endsWith('idm.swu.edu.cn') && !host.endsWith('uaaap.swu.edu.cn');
+}"""
+
+
+def _login_entry_choice():
+    """Return the configured login entry, defaulting to the 一网通办 portal."""
+    choice = (os.getenv("SWU_LOGIN_ENTRY") or "").strip().lower()
+    return choice if choice in {"ywtb", "portal"} else _DEFAULT_LOGIN_ENTRY
+
+
+def _login_entry_url(portal_url):
+    """Return the URL the browser should start the login from."""
+    if _login_entry_choice() == "portal":
+        return portal_url
+    return _YWTB_ENTRY_URL
+
+
+def _login_left_credential_hosts(page):
+    """Whether the browser is back on an entry site instead of IDM/CAS."""
+    host = _url_hostname(getattr(page, "url", ""))
+    if not host:
+        return False
+    return not any(host == item or host.endswith("." + item) for item in _CREDENTIAL_HOSTS)
+
+
+def _wait_for_entry_login(page, timeout, deadline=None):
+    """Wait until the credential pages are left after a successful sign-in."""
+    _remaining_seconds(deadline)
+    wait_for_function = getattr(page, "wait_for_function", None)
+    if wait_for_function is not None:
+        try:
+            wait_for_function(
+                _LEFT_CREDENTIAL_HOSTS_JS,
+                timeout=_browser_timeout_ms(timeout, deadline),
+            )
+        except DeadlineExceeded:
+            raise
+        except Exception:
+            # A timeout only means the explicit check below decides.
+            pass
+    _remaining_seconds(deadline)
+    return _login_left_credential_hosts(page)
+
+
+def _load_login_entry(page, username, entry_url, timeout, deadline=None):
+    """Open an authentication entry, retrying once on a transient error."""
+    for attempt in range(1, 3):
+        _remaining_seconds(deadline)
+        try:
+            response = page.goto(
+                entry_url,
+                wait_until="domcontentloaded",
+                timeout=_browser_timeout_ms(timeout, deadline),
+            )
+            _require_ok_http_status(_http_status(response))
+            return
+        except _RetryableHttpError as exc:
+            _remaining_seconds(deadline)
+            if attempt == 2:
+                raise LoginError("page_load", f"认证页面返回 HTTP {exc.status}") from exc
+            logger.warning(
+                "账号 %s: 登录页返回 HTTP %s (第 %s 次尝试)，正在重新载入...",
+                _debug_user_id(username),
+                exc.status,
+                attempt,
+            )
+        except Exception as exc:
+            _remaining_seconds(deadline)
+            if attempt == 2:
+                raise LoginError("page_load", f"登录页加载失败或超时: {_redact_text(exc)}")
+            logger.warning(
+                "账号 %s: 页面加载失败 (第 %s 次尝试): %s。正在重新载入...",
+                _debug_user_id(username),
+                attempt,
+                _redact_text(exc),
+            )
+
+
+def _submit_login_form(
+    page,
+    context,
+    username,
+    password,
+    timeout,
+    deadline,
+    *,
+    recovery_url,
+    wait_for_result,
+):
+    """Fill the credential form and submit until ``wait_for_result`` agrees.
+
+    ``wait_for_result(redirect_target, login_status)`` decides whether the
+    submission completed: the 一网通办 entry only has to leave the credential
+    pages, while the portal entry has to reach the portal Token.
+    """
+    last_login_status = None
+    for attempt in range(3):
+        _remaining_seconds(deadline)
+        logger.debug(
+            "账号 %s: 正在填写登录表单并识别验证码 (尝试 %s/3)...",
+            _debug_user_id(username),
+            attempt + 1,
+        )
+        ensure_login_form(page, username, timeout, recovery_url=recovery_url, deadline=deadline)
+        # Fill credentials
+        try:
+            form_timeout = min(5000, _browser_timeout_ms(timeout, deadline))
+            login_name_locator(page).fill(username, timeout=form_timeout)
+            password_locator(page).fill(password, timeout=form_timeout)
+        except Exception as exc:
+            recovery_status = recover_from_idm_error_page(
+                page, username, timeout, recovery_url=recovery_url, deadline=deadline
+            )
+            save_login_debug_artifacts(page, username, "fill_login_form_failed", exc)
+            if isinstance(recovery_status, int):
+                raise LoginError(
+                    "page_load",
+                    f"填写登录表单失败且认证页面返回 HTTP {recovery_status}: "
+                    f"{_redact_text(exc, [username, password])}",
+                )
+            raise LoginError(
+                "login_page_changed",
+                f"填写登录表单失败: {_redact_text(exc, [username, password])}",
+            )
+
+        # Capture captcha image bytes
+        captcha_el = captcha_locator(page)
+        img_bytes = get_captcha_image_bytes(page, captcha_el, timeout, deadline=deadline)
+
+        # Solve captcha
+        code = classify_captcha(img_bytes)
+        logger.debug("账号 %s: 已识别验证码", _debug_user_id(username))
+
+        captcha_input = captcha_input_locator(page)
+        # Fill the field in one step.  Any keystroke or clear would fire the IDM
+        # page's ``keyup`` handler, which calls ``verifyCode()``; that AJAX probe
+        # answers HTTP 400 today, so the handler treats every code as wrong and
+        # flips the page's global ``state`` to false, after which
+        # ``portalLogin()`` returns early and the form is never submitted at
+        # all.  A single ``fill`` leaves ``state`` true so the server validates
+        # the code together with the credentials.
+        captcha_input.fill(code, timeout=_browser_timeout_ms(timeout, deadline))
+
+        # The authentication service answers the login POST with HTTP 400 while
+        # the CAS hop's device cookies are present, and the page keeps
+        # re-creating them, so clear them right before the submit instead of
+        # once when the form first appears.  The host has to be resolved here:
+        # the entry URL may still point at the CAS hop, while the form lives on
+        # the login host.
+        login_host = _url_hostname(page.url)
+        _drop_federation_cookies(context, login_host, username)
+
+        # Click login
+        logger.debug("账号 %s: 提交表单中...", _debug_user_id(username))
+        redirect_target = None
+        login_status = None
+        try:
+            with page.expect_response(
+                lambda response: getattr(response.request, "method", "") == "POST"
+                and "/am/UI/Login" in response.url,
+                timeout=min(5000, _browser_timeout_ms(timeout, deadline)),
+            ) as login_response:
+                submit_button_locator(page).click(
+                    timeout=_browser_timeout_ms(timeout, deadline)
+                )
+            login_status = _http_status(login_response.value)
+            redirect_target = _absolute_redirect_target(
+                login_response.value,
+                (login_response.value.headers or {}).get("location"),
+            )
+            if login_status == 400:
+                logger.warning(
+                    "账号 %s: 登录 POST 返回 HTTP 400，符合统一认证前置拦截特征。",
+                    _debug_user_id(username),
+                )
+            logger.debug(
+                "账号 %s: 登录响应 HTTP %s，跳转目标 %s",
+                _debug_user_id(username),
+                login_status,
+                "已获取" if redirect_target else "缺失",
+            )
+        except Exception as exc:
+            # A missing response means the page refused to submit; the
+            # captcha/error handling below reports that case.
+            logger.debug(
+                "账号 %s: 未观察到登录表单提交响应：%s",
+                _debug_user_id(username),
+                _redact_text(exc),
+            )
+        last_login_status = login_status
+
+        if redirect_target:
+            # The successful login response re-issues the device cookies the
+            # authentication service rejects, and the redirect it triggers is
+            # answered with HTTP 400 before bouncing back to the login form.
+            # Clear them right away and request the target over HTTPS so the
+            # authenticated session survives the hop.
+            _complete_oauth_hop(page, context, username, redirect_target, timeout, deadline)
+
+        if wait_for_result(redirect_target, login_status):
+            logger.debug("账号 %s: 重定向成功！", _debug_user_id(username))
+            return
+        logger.debug(
+            "账号 %s: 登录结果检查完成，当前 URL: %s",
+            _debug_user_id(username),
+            _redact_url(page.url),
+        )
+
+        # Check for visible error message.  The dialog can appear a moment after
+        # the response, and a dismissed one stays in the DOM, so the reader
+        # waits briefly and only reports nodes that are actually visible.
+        error_msg = read_login_error_message(page, timeout, deadline=deadline).strip()
+
+        if error_msg:
+            safe_error_msg = _redact_text(error_msg, [username, password])
+            logger.warning("账号 %s: 登录页面返回错误信息: %s", _debug_user_id(username), safe_error_msg)
+            # A rejected password login surfaces as the same generic text, so
+            # keep it out of the captcha bucket and let the user check the
+            # credentials instead.
+            if any(k in error_msg for k in ["密码", "账户", "用户名", "动态口令", "不正确"]):
+                if "验证码" not in error_msg:
+                    raise LoginError("credential", f"账号或密码错误: {safe_error_msg}")
+
+        if "验证码" in error_msg:
+            confirm = page.locator(".pop .confirm").first
+            if confirm.count() and confirm.is_visible():
+                confirm.click(timeout=_browser_timeout_ms(timeout, deadline))
+
+        # If not redirected and no explicit credential error, refresh captcha
+        # and try again.
+        try:
+            # Back off a little: the school rejects repeated submissions from
+            # one client for a short while, and retrying instantly only deepens
+            # that penalty.
+            time.sleep(min(3, max(0.0, _remaining_seconds(deadline) or 3)))
+            logger.debug(
+                "账号 %s: 验证码识别错误或重定向未触发，刷新验证码重试...",
+                _debug_user_id(username),
+            )
+            captcha_el.click(timeout=_browser_timeout_ms(timeout, deadline))
+        except Exception:
+            pass
+
+    save_login_debug_artifacts(page, username, "captcha_or_redirect_failed")
+    raise LoginError(
+        _login_failure_reason(last_login_status),
+        "验证码连续识别失败，或登录服务没有完成跳转",
+    )
+
+
 def get_token(
     username: str,
     password: str,
@@ -1044,152 +1309,17 @@ def get_token(
         page.route("**/*", route_login_resource)
 
         try:
-            logger.debug("账号 %s: 正在访问 CAS 登录页面...", _debug_user_id(username))
-            # Load page with up to 2 retry attempts
-            for attempt in range(1, 3):
-                _remaining_seconds(deadline)
-                try:
-                    response = page.goto(
-                        cas_url,
-                        wait_until="domcontentloaded",
-                        timeout=_browser_timeout_ms(timeout, deadline),
-                    )
-                    _require_ok_http_status(_http_status(response))
-                    break
-                except _RetryableHttpError as exc:
-                    _remaining_seconds(deadline)
-                    if attempt == 2:
-                        raise LoginError("page_load", f"认证页面返回 HTTP {exc.status}") from exc
-                    logger.warning(
-                        "账号 %s: 登录页返回 HTTP %s (第 %s 次尝试)，正在重新载入...",
-                        _debug_user_id(username),
-                        exc.status,
-                        attempt,
-                    )
-                except Exception as e:
-                    _remaining_seconds(deadline)
-                    if attempt == 2:
-                        raise LoginError("page_load", f"登录页加载失败或超时: {_redact_text(e)}")
-                    logger.warning(
-                        "账号 %s: 页面加载失败 (第 %s 次尝试): %s。正在重新载入...",
-                        _debug_user_id(username),
-                        attempt,
-                        _redact_text(e),
-                    )
-
+            entry_url = _login_entry_url(cas_url)
+            logger.debug(
+                "账号 %s: 正在访问登录入口 %s ...",
+                _debug_user_id(username),
+                _url_hostname(entry_url),
+            )
+            _load_login_entry(page, username, entry_url, timeout, deadline)
             login_entry_url = page.url
-            ensure_login_form(page, username, timeout, recovery_url=cas_url, deadline=deadline)
 
-            success = False
-            last_login_status = None
-            # Try up to 3 times to solve captcha and submit
-            for attempt in range(3):
-                _remaining_seconds(deadline)
-                logger.debug(
-                    "账号 %s: 正在填写登录表单并识别验证码 (尝试 %s/3)...",
-                    _debug_user_id(username),
-                    attempt + 1,
-                )
-                ensure_login_form(page, username, timeout, recovery_url=cas_url, deadline=deadline)
-                # Fill credentials
-                try:
-                    form_timeout = min(5000, _browser_timeout_ms(timeout, deadline))
-                    login_name_locator(page).fill(username, timeout=form_timeout)
-                    password_locator(page).fill(password, timeout=form_timeout)
-                except Exception as exc:
-                    recovery_status = recover_from_idm_error_page(
-                        page, username, timeout, recovery_url=cas_url, deadline=deadline
-                    )
-                    save_login_debug_artifacts(page, username, "fill_login_form_failed", exc)
-                    if isinstance(recovery_status, int):
-                        raise LoginError(
-                            "page_load",
-                            f"填写登录表单失败且认证页面返回 HTTP {recovery_status}: "
-                            f"{_redact_text(exc, [username, password])}",
-                        )
-                    raise LoginError("login_page_changed", f"填写登录表单失败: {_redact_text(exc, [username, password])}")
-
-                # Capture captcha image bytes
-                captcha_el = captcha_locator(page)
-                img_bytes = get_captcha_image_bytes(page, captcha_el, timeout, deadline=deadline)
-
-                # Solve captcha
-                code = classify_captcha(img_bytes)
-                logger.debug("账号 %s: 已识别验证码", _debug_user_id(username))
-
-                captcha_input = captcha_input_locator(page)
-                # Fill the field in one step.  Any keystroke or clear would
-                # fire the IDM page's ``keyup`` handler, which calls
-                # ``verifyCode()``; that AJAX probe answers HTTP 400 today, so
-                # the handler treats every code as wrong and flips the page's
-                # global ``state`` to false, after which ``portalLogin()``
-                # returns early and the form is never submitted at all.  A
-                # single ``fill`` leaves ``state`` true so the server
-                # validates the code together with the credentials.
-                captcha_input.fill(code, timeout=_browser_timeout_ms(timeout, deadline))
-
-                # The authentication service answers the login POST with HTTP
-                # 400 while the CAS hop's device cookies are present, and the
-                # page keeps re-creating them, so clear them right before the
-                # submit instead of once when the form first appears.
-                # The host has to be resolved here: the entry URL still points
-                # at the CAS hop, while the form now lives on the login host.
-                login_host = _url_hostname(page.url)
-                _drop_federation_cookies(context, login_host, username)
-
-                # Click login
-                logger.debug("账号 %s: 提交表单中...", _debug_user_id(username))
-                redirect_target = None
-                login_status = None
-                try:
-                    with page.expect_response(
-                        lambda response: getattr(response.request, "method", "") == "POST"
-                        and "/am/UI/Login" in response.url,
-                        timeout=min(5000, _browser_timeout_ms(timeout, deadline)),
-                    ) as login_response:
-                        submit_button_locator(page).click(
-                            timeout=_browser_timeout_ms(timeout, deadline)
-                        )
-                    login_status = _http_status(login_response.value)
-                    redirect_target = _absolute_redirect_target(
-                        login_response.value,
-                        (login_response.value.headers or {}).get("location"),
-                    )
-                    if login_status == 400:
-                        logger.warning(
-                            "账号 %s: 登录 POST 返回 HTTP 400，符合统一认证前置拦截特征。",
-                            _debug_user_id(username),
-                        )
-                    logger.debug(
-                        "账号 %s: 登录响应 HTTP %s，跳转目标 %s",
-                        _debug_user_id(username),
-                        login_status,
-                        "已获取" if redirect_target else "缺失",
-                    )
-                except Exception as exc:
-                    # A missing response means the page refused to submit; the
-                    # captcha/error handling below reports that case.
-                    logger.debug(
-                        "账号 %s: 未观察到登录表单提交响应：%s",
-                        _debug_user_id(username),
-                        _redact_text(exc),
-                    )
-                last_login_status = login_status
-
-                if redirect_target:
-                    # The successful login response re-issues the device
-                    # cookies the authentication service rejects, and the
-                    # redirect it triggers is answered with HTTP 400 before
-                    # bouncing back to the login form.  Clear them right away
-                    # and request the target over HTTPS so the authenticated
-                    # session survives the hop.
-                    _complete_oauth_hop(page, context, username, redirect_target, timeout, deadline)
-
-                # Wait for an explicit portal-host ticket/token condition.
-                # Waiting for network quiescence is both slower and brittle on
-                # pages that keep analytics or polling requests open.
-                # Without a recorded redirect there is nothing to wait for, so
-                # keep that window short and go straight to the retry path.
+            def wait_for_portal_result(redirect_target, login_status):
+                """The portal entry has to reach the portal Token."""
                 redirected = _wait_for_login_result(
                     page,
                     login_entry_url,
@@ -1211,55 +1341,59 @@ def get_token(
                         timeout,
                         deadline=deadline,
                     )
+                return redirected
+
+            def wait_for_entry_result(redirect_target, _login_status):
+                """The 一网通办 entry only has to leave the credential pages."""
+                return _wait_for_entry_login(
+                    page,
+                    timeout if redirect_target else min(10, timeout),
+                    deadline=deadline,
+                )
+
+            if entry_url == cas_url:
+                _submit_login_form(
+                    page,
+                    context,
+                    username,
+                    password,
+                    timeout,
+                    deadline,
+                    recovery_url=cas_url,
+                    wait_for_result=wait_for_portal_result,
+                )
+            else:
+                # Sign in at the configured entry exactly like a user does; the
+                # resulting CAS session is what the portal entry needs.
+                _submit_login_form(
+                    page,
+                    context,
+                    username,
+                    password,
+                    timeout,
+                    deadline,
+                    recovery_url=entry_url,
+                    wait_for_result=wait_for_entry_result,
+                )
                 logger.debug(
-                    "账号 %s: 登录结果检查完成，当前 URL: %s",
-                    _debug_user_id(username),
-                    _redact_url(page.url),
+                    "账号 %s: 正在通过门户入口获取 Token...", _debug_user_id(username)
                 )
-
-                if redirected:
-                    logger.debug("账号 %s: 重定向成功！", _debug_user_id(username))
-                    success = True
-                    break
-
-                # Check for visible error message
-                # The dialog can appear a moment after the response, and a
-                # dismissed one stays in the DOM, so this waits briefly and
-                # only reports nodes that are actually visible.
-                error_msg = read_login_error_message(page, timeout, deadline=deadline).strip()
-
-                if error_msg:
-                    safe_error_msg = _redact_text(error_msg, [username, password])
-                    logger.warning("账号 %s: 登录页面返回错误信息: %s", _debug_user_id(username), safe_error_msg)
-                    # A rejected password login surfaces as the same generic
-                    # text, so keep it out of the captcha bucket and let the
-                    # user check the credentials instead.
-                    if any(k in error_msg for k in ["密码", "账户", "用户名", "动态口令", "不正确"]):
-                        if "验证码" not in error_msg:
-                            raise LoginError("credential", f"账号或密码错误: {safe_error_msg}")
-
-                if "验证码" in error_msg:
-                    confirm = page.locator(".pop .confirm").first
-                    if confirm.count() and confirm.is_visible():
-                        confirm.click(timeout=_browser_timeout_ms(timeout, deadline))
-
-                # If not redirected and no explicit credential error, refresh captcha and try again
-                try:
-                    # Back off a little: the school rejects repeated
-                    # submissions from one client for a short while, and
-                    # retrying instantly only deepens that penalty.
-                    time.sleep(min(3, max(0.0, _remaining_seconds(deadline) or 3)))
-                    logger.debug("账号 %s: 验证码识别错误或重定向未触发，刷新验证码重试...", _debug_user_id(username))
-                    captcha_el.click(timeout=_browser_timeout_ms(timeout, deadline))
-                except Exception:
-                    pass
-
-            if not success:
-                save_login_debug_artifacts(page, username, "captcha_or_redirect_failed")
-                raise LoginError(
-                    _login_failure_reason(last_login_status),
-                    "验证码连续识别失败，或登录服务没有完成跳转",
-                )
+                _load_login_entry(page, username, cas_url, timeout, deadline)
+                if not _wait_for_login_result(
+                    page, login_entry_url, timeout, deadline=deadline
+                ):
+                    # The CAS session did not carry over, or the portal asked
+                    # for credentials again: sign in here as before.
+                    _submit_login_form(
+                        page,
+                        context,
+                        username,
+                        password,
+                        timeout,
+                        deadline,
+                        recovery_url=cas_url,
+                        wait_for_result=wait_for_portal_result,
+                    )
 
             # Extract token from localStorage.  The explicit ticket/token
             # condition above means no network-idle wait is needed here.

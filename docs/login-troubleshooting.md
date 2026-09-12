@@ -5,9 +5,16 @@
 
 ## 链路
 
-`of.swu.edu.cn` 的联邦登录入口 → `uaaap.swu.edu.cn`（CAS，点击「统一认证登录」）
-→ `idm.swu.edu.cn/am/UI/Login`（用户名密码 + 图形验证码）→ 登录 POST → 授权跳转
-→ 门户 `of.swu.edu.cn` 的 CAS ticket → 交换 Token → 写入缓存。
+默认从 `ywtb.swu.edu.cn`（一网通办）进入，与用户浏览器的手动流程一致：
+
+1. 阶段一：`ywtb.swu.edu.cn` → 一网通办中心认证 → `uaaap.swu.edu.cn`（CAS，
+   点击「统一认证登录」）→ `idm.swu.edu.cn/am/UI/Login`（用户名密码 + 图形验证码）
+   → 登录 POST。成功判据是"离开 `idm`/`uaaap` 凭据页"，即在 一网通办 侧完成登录、
+   建立 CAS 会话。
+2. 阶段二：再走门户 `of.swu.edu.cn` 的联邦入口，凭该会话换回门户的 CAS ticket →
+   交换 Token → 写入缓存。若会话没有带过去，会自动退回门户入口的登录流程。
+
+设置 `SWU_LOGIN_ENTRY=portal` 可回到"直接从门户联邦入口登录"的旧行为。
 
 ## 已知失败特征
 
@@ -34,6 +41,7 @@
 | 环境变量 | 作用 |
 | --- | --- |
 | `SWU_LOGIN_UA` | 直接指定浏览器 User-Agent，覆盖自动生成的字符串（例如需要固定为某个已验证值时） |
+| `SWU_LOGIN_ENTRY` | 登录入口：默认 `ywtb`（一网通办），设为 `portal` 则从门户联邦入口开始 |
 | `SWU_LOG_LEVEL` | `DEBUG` 时会输出每一次跳转、Cookie 清理数量和重试原因，便于定位 |
 | `SWU_DEBUG_DIR` | 登录失败时保存脱敏诊断文本的目录 |
 

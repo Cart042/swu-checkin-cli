@@ -308,6 +308,55 @@ class LoginApiOfflineTests(unittest.TestCase):
             get_info._require_ok_http_status(503)
         self.assertEqual(caught.exception.status, 503)
 
+    def test_login_entry_defaults_to_the_ywtb_portal(self):
+        portal = "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
+        environment = {key: value for key, value in os.environ.items() if key != "SWU_LOGIN_ENTRY"}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(get_info._login_entry_choice(), "ywtb")
+            self.assertEqual(get_info._login_entry_url(portal), get_info._YWTB_ENTRY_URL)
+
+    def test_login_entry_can_be_switched_back_to_the_portal(self):
+        portal = "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
+        with mock.patch.dict(os.environ, {"SWU_LOGIN_ENTRY": "portal"}):
+            self.assertEqual(get_info._login_entry_choice(), "portal")
+            self.assertEqual(get_info._login_entry_url(portal), portal)
+        with mock.patch.dict(os.environ, {"SWU_LOGIN_ENTRY": "nonsense"}):
+            self.assertEqual(get_info._login_entry_choice(), "ywtb")
+
+    def test_entry_login_waits_until_the_credential_hosts_are_left(self):
+        entry_page = mock.Mock()
+        entry_page.url = "https://ywtb.swu.edu.cn/center-auth-server/index"
+        self.assertTrue(get_info._login_left_credential_hosts(entry_page))
+        self.assertTrue(get_info._wait_for_entry_login(entry_page, 5))
+
+        idm_page = mock.Mock()
+        idm_page.url = "https://idm.swu.edu.cn/am/UI/Login"
+        idm_page.wait_for_function.side_effect = TimeoutError("still on idm")
+        self.assertFalse(get_info._login_left_credential_hosts(idm_page))
+        self.assertFalse(get_info._wait_for_entry_login(idm_page, 5))
+
+        cas_page = mock.Mock()
+        cas_page.url = "https://uaaap.swu.edu.cn/cas/login"
+        self.assertFalse(get_info._login_left_credential_hosts(cas_page))
+
+    def test_load_login_entry_retries_a_transient_error_page(self):
+        page = mock.Mock()
+        page.goto.side_effect = [mock.Mock(status=400), mock.Mock(status=200)]
+        get_info._load_login_entry(
+            page, "offline", "https://idm.swu.edu.cn/am/UI/Login", 5
+        )
+        self.assertEqual(page.goto.call_count, 2)
+
+    def test_load_login_entry_reports_page_load_when_retries_run_out(self):
+        page = mock.Mock()
+        page.goto.return_value = mock.Mock(status=503)
+        with self.assertRaises(get_info.LoginError) as caught:
+            get_info._load_login_entry(
+                page, "offline", "https://idm.swu.edu.cn/am/UI/Login", 5
+            )
+        self.assertEqual(caught.exception.reason, "page_load")
+        self.assertEqual(str(caught.exception), "认证页面返回 HTTP 503")
+
     def test_login_error_message_reader_skips_dismissed_dialogs(self):
         # The IDM page only fades its dialog out, so the reader has to filter
         # on visibility instead of trusting whatever text is still in the DOM.

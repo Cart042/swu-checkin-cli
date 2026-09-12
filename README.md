@@ -175,6 +175,7 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 | `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`；可选 `DEBUG`、`WARNING`、`ERROR` |
 | `SWU_DEBUG_DIR` | 登录异常调试目录；仅排查问题时设置，例如 `debug` |
 | `SWU_LOGIN_UA` | 覆盖浏览器登录使用的 User-Agent；默认按运行中浏览器版本和当前平台生成 |
+| `SWU_LOGIN_ENTRY` | 登录入口；默认 `ywtb`（从一网通办进入），设为 `portal` 则从门户联邦入口开始 |
 | `SWU_PUSH_DEADLINE_SECONDS` | 本次推送共享总预算，默认 `60` 秒，允许范围 `1-3600` 秒 |
 | `PUSH_TELEGRAM_BOT_TOKEN` | Telegram Bot Token；需与 Chat ID 同时设置 |
 | `PUSH_TELEGRAM_CHAT_ID` | Telegram 接收消息的 Chat ID；需与 Bot Token 同时设置 |
