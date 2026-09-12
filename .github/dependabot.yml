@@ -42,3 +42,10 @@ updates:
     labels: [dependencies, docker]
     commit-message:
       prefix: docker
+    ignore:
+      # 基础镜像的 Python 版本要和 CI 矩阵（3.11/3.12）、requires-python 以及
+      # ddddocr / onnxruntime 的 wheel 覆盖范围一起决定，不能让 Dependabot 自动
+      # 跳到 3.14：PR CI 不构建镜像，跳版本的风险不会被任何检查拦住。
+      # 升级基础镜像时手动改 Dockerfile 即可。
+      - dependency-name: "python"
+        update-types: ["version-update:semver-minor"]
