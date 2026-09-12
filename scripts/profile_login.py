@@ -292,7 +292,7 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
         # messages, URLs, or response content.
         reason = getattr(exc, "reason", None)
         if isinstance(reason, str) and reason in {
-            "credential", "page_load", "captcha", "token_extract",
+            "credential", "page_load", "waf_blocked", "captcha", "token_extract",
             "login_page_changed", "unknown",
         }:
             result["error_reason"] = reason

@@ -201,28 +201,76 @@ def save_login_debug_artifacts(page, username, reason, error=None):
         logger.warning("账号 %s: 保存登录诊断失败：%s", safe_user, _redact_text(exc, [username]))
 
 
-def _check_login_page_response(response):
+class _RetryableHttpError(Exception):
+    """An authentication page answered with HTTP 4xx/5xx.
+
+    The school's front end answers intermittently, so callers keep their retry
+    budget instead of treating the first error document as fatal.
+    """
+
+    def __init__(self, status):
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
+def _http_status(response):
+    """Return the HTTP status of a navigation response, when it carries one."""
+    status = getattr(response, "status", None)
+    return status if isinstance(status, int) else None
+
+
+def _require_ok_http_status(status):
     """Do not mistake an HTTP error document for a changed login form."""
-    if response is not None and response.status >= 400:
+    if status is not None and status >= 400:
         # URLs, headers and response bodies may contain authentication state.
-        raise LoginError("page_load", f"认证页面返回 HTTP {response.status}")
+        raise _RetryableHttpError(status)
+
+
+def _remember_http_status(status, previous):
+    """Keep the last 4xx/5xx seen while retrying, for the final classification."""
+    if isinstance(status, int) and status >= 400:
+        return status
+    return previous
+
+
+def _login_failure_reason(last_login_status):
+    """Classify a login that never completed.
+
+    ``POST /am/UI/Login`` answering HTTP 400 is the signature of the front-end
+    interception described in ``docs/login-troubleshooting.md``; anything else
+    that reached the page stays a captcha failure.
+    """
+    return "waf_blocked" if last_login_status == 400 else "captcha"
 
 
 def recover_from_idm_error_page(page, username, timeout, recovery_url=None, deadline=None):
+    """Re-open the login entry when the IDM shows its verification-failed page.
+
+    Returns ``None`` when there was nothing to recover, ``True`` when the entry
+    was re-opened, and the HTTP status when the re-open itself was rejected --
+    the caller then keeps its retry budget instead of aborting immediately.
+    """
     _remaining_seconds(deadline)
     try:
         body_text = page.locator("body").inner_text(timeout=min(2000, _browser_timeout_ms(timeout, deadline)))
     except Exception:
         body_text = ""
     if "动态口令验证失败" not in body_text and "验证失败" not in body_text:
-        return False
+        return None
 
     logger.warning("账号 %s: 统一认证页面提示验证失败，尝试重新打开登录入口。", _debug_user_id(username))
     try:
         _remaining_seconds(deadline)
         if recovery_url:
             response = page.goto(recovery_url, wait_until="domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
-            _check_login_page_response(response)
+            status = _http_status(response)
+            if status is not None and status >= 400:
+                logger.warning(
+                    "账号 %s: 重新打开登录入口返回 HTTP %s，稍后重试。",
+                    _debug_user_id(username),
+                    status,
+                )
+                return status
         else:
             link = page.locator('a:has-text("返回至登录页面")').first
             href = link.get_attribute("href", timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
@@ -233,14 +281,19 @@ def recover_from_idm_error_page(page, username, timeout, recovery_url=None, dead
                     wait_until="domcontentloaded",
                     timeout=_browser_timeout_ms(timeout, deadline),
                 )
-                _check_login_page_response(response)
+                status = _http_status(response)
+                if status is not None and status >= 400:
+                    logger.warning(
+                        "账号 %s: 返回登录页面返回 HTTP %s，稍后重试。",
+                        _debug_user_id(username),
+                        status,
+                    )
+                    return status
             else:
                 link.click(timeout=_browser_timeout_ms(timeout, deadline))
                 page.wait_for_load_state("domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
         logger.debug("账号 %s: 返回登录页面后 URL: %s", _debug_user_id(username), _redact_url(page.url))
         return True
-    except LoginError:
-        raise
     except Exception as exc:
         save_login_debug_artifacts(page, username, "idm_error_recovery_failed", exc)
         raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
@@ -296,11 +349,16 @@ def get_captcha_image_bytes(page, captcha_el, timeout, deadline=None):
     captcha_el.wait_for(state="visible", timeout=_browser_timeout_ms(timeout, deadline))
     # Read the image already rendered in this browser session. Fetching its
     # URL again can generate a new challenge and mutate the server session.
-    page.wait_for_function(
-        "img => img.complete && img.naturalWidth > 0",
-        arg=captcha_el.element_handle(timeout=_browser_timeout_ms(timeout, deadline)),
-        timeout=_browser_timeout_ms(timeout, deadline),
-    )
+    try:
+        page.wait_for_function(
+            "img => img.complete && img.naturalWidth > 0",
+            arg=captcha_el.element_handle(timeout=_browser_timeout_ms(timeout, deadline)),
+            timeout=_browser_timeout_ms(timeout, deadline),
+        )
+    except Exception as exc:
+        # A captcha that never renders is a captcha problem, not an unknown
+        # browser failure: keep the exit code and the diagnostic precise.
+        raise LoginError("captcha", f"验证码图片未加载完成: {_redact_text(exc)}")
     return captcha_el.screenshot(timeout=_browser_timeout_ms(timeout, deadline))
 
 
@@ -312,7 +370,27 @@ def submit_button_locator(page):
     return page.locator('input#button, button:has-text("登录"), input[type="submit"], .loginBtn, .btn-login').first
 
 
+def _login_form_ready(page, username, timeout, deadline=None):
+    """Wait for the account/password controls and report whether they appeared."""
+    try:
+        login_name_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
+        password_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
+    except Exception:
+        return False
+    logger.debug("账号 %s: 已找到登录表单。", _debug_user_id(username))
+    return True
+
+
 def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None):
+    """Make sure the account/password form is on screen.
+
+    HTTP error documents from the authentication chain are retried here instead
+    of ending the login: the school's front end answers intermittently and
+    ``get_token`` has its own retry budget.  Only after every attempt has
+    failed is ``page_load`` raised, and only when an HTTP failure was actually
+    seen; a missing form without one is still reported as a structure change.
+    """
+    last_http_status = None
     for attempt in range(1, 4):
         _remaining_seconds(deadline)
         logger.debug(
@@ -321,15 +399,15 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
             attempt,
             _redact_url(page.url),
         )
-        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url, deadline=deadline)
+        last_http_status = _remember_http_status(
+            recover_from_idm_error_page(
+                page, username, timeout, recovery_url=recovery_url, deadline=deadline
+            ),
+            last_http_status,
+        )
         click_username_password_tab(page, username, timeout, deadline=deadline)
-        try:
-            login_name_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
-            password_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
-            logger.debug("账号 %s: 已找到登录表单。", _debug_user_id(username))
+        if _login_form_ready(page, username, timeout, deadline):
             return
-        except Exception:
-            pass
 
         button = page.locator('img[src*="unified_button"]').first
         try:
@@ -340,10 +418,15 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
                     timeout=_browser_timeout_ms(timeout, deadline),
                 ) as navigation:
                     button.click(timeout=_browser_timeout_ms(timeout, deadline))
-                _check_login_page_response(navigation.value)
+                navigation_status = _http_status(navigation.value)
+                if navigation_status is not None and navigation_status >= 400:
+                    logger.warning(
+                        "账号 %s: 统一认证跳转返回 HTTP %s，重新尝试登录入口。",
+                        _debug_user_id(username),
+                        navigation_status,
+                    )
+                last_http_status = _remember_http_status(navigation_status, last_http_status)
                 continue
-        except LoginError:
-            raise
         except Exception as exc:
             logger.debug(
                 "账号 %s: 点击统一认证登录按钮失败 (第 %s/3 次): %s",
@@ -352,17 +435,19 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
                 _redact_text(exc),
             )
 
-        recover_from_idm_error_page(page, username, timeout, recovery_url=recovery_url, deadline=deadline)
+        last_http_status = _remember_http_status(
+            recover_from_idm_error_page(
+                page, username, timeout, recovery_url=recovery_url, deadline=deadline
+            ),
+            last_http_status,
+        )
         click_username_password_tab(page, username, timeout, deadline=deadline)
-        try:
-            login_name_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
-            password_locator(page).wait_for(timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
-            logger.debug("账号 %s: 已找到登录表单。", _debug_user_id(username))
+        if _login_form_ready(page, username, timeout, deadline):
             return
-        except Exception:
-            pass
 
     save_login_debug_artifacts(page, username, "login_form_not_found")
+    if last_http_status is not None:
+        raise LoginError("page_load", f"认证页面返回 HTTP {last_http_status}")
     raise LoginError("login_page_changed", "未找到登录表单，登录页结构可能已变化")
 
 
@@ -400,21 +485,54 @@ def _browser_timeout_ms(timeout, deadline):
         return 1000
 
 
+# ``navigator.platform`` and ``sec-ch-ua-platform`` still report the real host
+# OS, so a hard-coded Windows token on a Linux runner is exactly the kind of
+# contradiction a device check looks for.  ``SWU_LOGIN_UA`` pins an explicit
+# string for a deployment that needs the historically validated value.
+_PLATFORM_UA_TOKENS = {
+    "darwin": "Macintosh; Intel Mac OS X 10_15_7",
+    "linux": "X11; Linux x86_64",
+    "win32": "Windows NT 10.0; Win64; x64",
+}
+_FALLBACK_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def _platform_user_agent_token(platform=None):
+    """Return the User-Agent platform token for ``platform``."""
+    key = sys.platform if platform is None else platform
+    return _PLATFORM_UA_TOKENS.get(key, _PLATFORM_UA_TOKENS["win32"])
+
+
 def _login_user_agent(browser):
-    """Return a User-Agent the school WAF accepts, or ``None`` for the default.
+    """Return a User-Agent the school WAF accepts.
 
     Headless Chromium advertises ``HeadlessChrome`` in its User-Agent.  The
     unified login host answers HTTP 400 for that token on the federation hop
     even when every other request header is identical, so a headless run has
     to present an ordinary Chrome User-Agent.  The version is taken from the
-    running browser so the string does not go stale.
+    running browser so the string does not go stale, and the platform token
+    follows the host so the header agrees with the browser's own hints.
+
+    ``SWU_LOGIN_UA`` overrides the whole string, and a browser version that
+    cannot be parsed falls back to a fixed Chrome User-Agent rather than the
+    headless default that the WAF rejects.
     """
+    override = (os.getenv("SWU_LOGIN_UA") or "").strip()
+    if override:
+        return override
     version = str(getattr(browser, "version", "") or "").strip()
     match = re.match(r"(\d+)", version)
     if not match:
-        return None
+        logger.warning(
+            "无法从浏览器版本 %s 推导 User-Agent，改用固定值。",
+            _redact_text(version) or "<empty>",
+        )
+        return _FALLBACK_USER_AGENT
     return (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        f"Mozilla/5.0 ({_platform_user_agent_token()}) AppleWebKit/537.36 "
         f"(KHTML, like Gecko) Chrome/{match.group(1)}.0.0.0 Safari/537.36"
     )
 
@@ -424,6 +542,19 @@ def _login_user_agent(browser):
 _OPAQUE_COOKIE_NAME = re.compile(r"^[0-9A-Za-z]{13}$")
 
 
+def _cookie_reaches_login_host(cookie_domain, login_host):
+    """Whether a cookie scoped to ``cookie_domain`` is sent to ``login_host``.
+
+    Host-only cookies match exactly; a domain cookie matches the domain itself
+    and every subdomain, which is why a device cookie issued for ``swu.edu.cn``
+    would also be replayed to the login host.
+    """
+    domain = (cookie_domain or "").lstrip(".").rstrip(".").lower()
+    if not domain:
+        return False
+    return login_host == domain or login_host.endswith("." + domain)
+
+
 def _drop_federation_cookies(context, login_host, username):
     """Remove the CAS hop's opaque device cookies before submitting the form.
 
@@ -431,60 +562,94 @@ def _drop_federation_cookies(context, login_host, username):
     ``idm.swu.edu.cn``.  While they are present, ``POST /am/UI/Login`` is
     answered with HTTP 400 and an empty body; after removing exactly those
     cookies the same POST reaches the authentication service and returns its
-    normal result page.  Only cookies scoped to the login host are touched,
-    so the CAS session and every other domain stay intact.
+    normal result page.
+
+    Deletion targets each cookie's exact ``name``/``domain`` pair, so the rest
+    of the jar -- including the same cookie names on the CAS host -- stays
+    intact.  Returns ``True`` when the jar is in the intended state.
     """
     host = (login_host or "").rstrip(".").lower()
     if not host:
-        return
+        return False
     try:
         cookies = context.cookies()
     except Exception as exc:
-        logger.debug("账号 %s: 读取浏览器 Cookie 失败：%s", _debug_user_id(username), _redact_text(exc))
-        return
+        logger.warning("账号 %s: 读取浏览器 Cookie 失败：%s", _debug_user_id(username), _redact_text(exc))
+        return False
 
-    def on_login_host(cookie):
-        return (cookie.get("domain") or "").lstrip(".").lower() == host
-
-    dropped = {
-        cookie["name"]
-        for cookie in cookies
-        if on_login_host(cookie) and _OPAQUE_COOKIE_NAME.match(cookie.get("name") or "")
-    }
-    if not dropped:
-        return
-
-    keep = []
-    for cookie in cookies:
-        if on_login_host(cookie) and cookie["name"] in dropped:
-            continue
-        entry = {
-            "name": cookie["name"],
-            "value": cookie["value"],
-            "domain": cookie["domain"],
-            "path": cookie.get("path") or "/",
-            "httpOnly": bool(cookie.get("httpOnly")),
-            "secure": bool(cookie.get("secure")),
+    targets = sorted(
+        {
+            (cookie.get("domain") or "", cookie.get("name") or "")
+            for cookie in cookies
+            if _cookie_reaches_login_host(cookie.get("domain"), host)
+            and _OPAQUE_COOKIE_NAME.match(cookie.get("name") or "")
         }
-        if cookie.get("sameSite"):
-            entry["sameSite"] = cookie["sameSite"]
-        expires = cookie.get("expires")
-        if isinstance(expires, (int, float)) and expires > 0:
-            entry["expires"] = expires
-        keep.append(entry)
-
-    try:
-        context.clear_cookies()
-        if keep:
-            context.add_cookies(keep)
-    except Exception as exc:
-        logger.debug("账号 %s: 清除认证跳转遗留 Cookie 失败：%s", _debug_user_id(username), _redact_text(exc))
-        return
-    logger.debug(
-        "账号 %s: 已清除认证跳转遗留 Cookie：%s",
-        _debug_user_id(username),
-        ",".join(sorted(dropped)),
     )
+    if not targets:
+        return True
+
+    for domain, name in targets:
+        try:
+            context.clear_cookies(name=name, domain=domain)
+        except Exception as exc:
+            # Everything else stays in the jar, so the caller can still retry
+            # instead of continuing without any cookie at all.
+            logger.warning(
+                "账号 %s: 清除认证跳转遗留 Cookie 失败：%s",
+                _debug_user_id(username),
+                _redact_text(exc),
+            )
+            return False
+    logger.debug(
+        "账号 %s: 已清除认证跳转遗留 Cookie %s 个。",
+        _debug_user_id(username),
+        len(targets),
+    )
+    return True
+
+
+def _absolute_redirect_target(response, location):
+    """Resolve a login response's ``Location`` against its own URL.
+
+    The login response points at the plain-HTTP form of the authorize URL,
+    whose redirect loses the authenticated session and bounces back to the
+    login form, so replaying the same URL over HTTPS reaches the portal.  A
+    relative ``Location`` is resolved first, which keeps that upgrade -- and
+    the recovery path that uses this value -- applicable to it as well.
+    """
+    if not location:
+        return None
+    base = getattr(response, "url", "") or ""
+    target = urllib.parse.urljoin(base, location) if base else location
+    if target.startswith("http://"):
+        target = "https://" + target[len("http://"):]
+    return target
+
+
+def _complete_oauth_hop(page, context, username, target, timeout, deadline=None):
+    """Clear the re-issued device cookies and drive the post-login hop."""
+    logger.debug(
+        "账号 %s: 正在完成登录跳转（%s）。",
+        _debug_user_id(username),
+        _url_hostname(target) or "<unknown>",
+    )
+    _drop_federation_cookies(context, _url_hostname(target), username)
+    try:
+        response = page.goto(
+            target,
+            wait_until="domcontentloaded",
+            timeout=_browser_timeout_ms(timeout, deadline),
+        )
+    except Exception as exc:
+        logger.debug("账号 %s: 登录跳转失败：%s", _debug_user_id(username), _redact_text(exc))
+        return False
+    logger.debug(
+        "账号 %s: 登录跳转返回 HTTP %s，当前 URL: %s",
+        _debug_user_id(username),
+        getattr(response, "status", None),
+        _redact_url(page.url),
+    )
+    return True
 
 
 def _recover_blocked_oauth_hop(
@@ -492,46 +657,27 @@ def _recover_blocked_oauth_hop(
     context,
     username,
     login_entry_url,
-    redirect_target,
+    target,
     timeout,
     deadline=None,
 ):
     """Re-drive the post-login OAuth hop after a device-cookie rejection.
 
     The successful login response re-issues the school's device cookies, and
-    the OAuth hop that follows is answered with HTTP 400 while they are
-    present.  Chromium follows that redirect internally, so the rejected hop
-    cannot be intercepted; dropping the cookies and requesting the recorded
-    redirect target instead hands the browser straight to the portal.
+    the hop that follows is answered with HTTP 400 while they are present.
+    Chromium follows that redirect internally, so the rejected hop cannot be
+    intercepted; dropping the cookies and requesting the target again hands the
+    browser straight to the portal.  ``target`` may be ``None`` when the login
+    response carried no usable ``Location``: the address the page already sits
+    on is re-driven then, so this fallback stays reachable in that case too.
     """
     host = _url_hostname(page.url)
-    target = redirect_target or page.url
-    # The login response points at the plain-HTTP form of the authorize URL,
-    # whose redirect loses the authenticated session and bounces back to the
-    # login form.  Replaying the same URL over HTTPS reaches the portal.
-    if target.startswith("http://"):
-        target = "https://" + target[len("http://"):]
     logger.debug(
         "账号 %s: 登录跳转停留在 %s，尝试清除设备 Cookie 后重试。",
         _debug_user_id(username),
         host or "<unknown>",
     )
-    _drop_federation_cookies(context, _url_hostname(target) or host, username)
-    try:
-        logger.debug("账号 %s: 重新请求登录跳转地址以绕过认证拦截。", _debug_user_id(username))
-        response = page.goto(
-            target,
-            wait_until="domcontentloaded",
-            timeout=_browser_timeout_ms(timeout, deadline),
-        )
-        logger.debug(
-            "账号 %s: 重试跳转返回 HTTP %s，当前 URL: %s",
-            _debug_user_id(username),
-            getattr(response, "status", None),
-            _redact_url(page.url),
-        )
-    except Exception as exc:
-        logger.debug("账号 %s: 重试登录跳转失败：%s", _debug_user_id(username), _redact_text(exc))
+    if not _complete_oauth_hop(page, context, username, target or page.url, timeout, deadline):
         return False
     return _wait_for_login_result(page, login_entry_url, timeout, deadline=deadline)
 
@@ -663,6 +809,53 @@ def _wait_for_login_result(page, login_entry_url, timeout, deadline=None):
             pass
     _remaining_seconds(deadline)
     return _login_success_detected(page, login_entry_url)
+
+
+# ``closelert()`` on the IDM page only fades the dialog out; the node stays in
+# the DOM with its text, so a dismissed message must not be read again on the
+# next attempt.  Only visible nodes are collected here.
+_LOGIN_ERROR_MESSAGE_JS = """() => {
+    const seen = new Set();
+    const nodes = document.querySelectorAll(
+        '.pop .ctnTxt, .error, #error, .errorMessage, #errorMessage, .messager-body'
+    );
+    for (const node of nodes) {
+        if (!node.getClientRects().length) {
+            continue;
+        }
+        const text = (node.innerText || '').trim();
+        if (text) {
+            seen.add(text);
+        }
+    }
+    return Array.from(seen).join('\\n');
+}"""
+
+_LOGIN_ERROR_MESSAGE_SELECTOR = (
+    ".pop .ctnTxt, .error, #error, .errorMessage, #errorMessage, .messager-body"
+)
+
+
+def read_login_error_message(page, timeout, deadline=None):
+    """Return the visible failure text the login page is showing, if any.
+
+    The dialog can appear a moment after the response, so this gives it a short
+    grace period instead of sampling once and reporting "no error".
+    """
+    wait_for_selector = getattr(page, "wait_for_selector", None)
+    if wait_for_selector is not None:
+        try:
+            wait_for_selector(
+                _LOGIN_ERROR_MESSAGE_SELECTOR,
+                state="visible",
+                timeout=min(2000, _browser_timeout_ms(timeout, deadline)),
+            )
+        except Exception:
+            pass
+    try:
+        return page.evaluate(_LOGIN_ERROR_MESSAGE_JS) or ""
+    except Exception:
+        return ""
 
 
 def _validate_and_cache_token(username, token, cache_path, timeout, session, deadline):
@@ -831,10 +1024,18 @@ def get_token(
                         wait_until="domcontentloaded",
                         timeout=_browser_timeout_ms(timeout, deadline),
                     )
-                    _check_login_page_response(response)
+                    _require_ok_http_status(_http_status(response))
                     break
-                except LoginError:
-                    raise
+                except _RetryableHttpError as exc:
+                    _remaining_seconds(deadline)
+                    if attempt == 2:
+                        raise LoginError("page_load", f"认证页面返回 HTTP {exc.status}") from exc
+                    logger.warning(
+                        "账号 %s: 登录页返回 HTTP %s (第 %s 次尝试)，正在重新载入...",
+                        _debug_user_id(username),
+                        exc.status,
+                        attempt,
+                    )
                 except Exception as e:
                     _remaining_seconds(deadline)
                     if attempt == 2:
@@ -850,6 +1051,7 @@ def get_token(
             ensure_login_form(page, username, timeout, recovery_url=cas_url, deadline=deadline)
 
             success = False
+            last_login_status = None
             # Try up to 3 times to solve captcha and submit
             for attempt in range(3):
                 _remaining_seconds(deadline)
@@ -865,8 +1067,16 @@ def get_token(
                     login_name_locator(page).fill(username, timeout=form_timeout)
                     password_locator(page).fill(password, timeout=form_timeout)
                 except Exception as exc:
-                    recover_from_idm_error_page(page, username, timeout, recovery_url=cas_url, deadline=deadline)
+                    recovery_status = recover_from_idm_error_page(
+                        page, username, timeout, recovery_url=cas_url, deadline=deadline
+                    )
                     save_login_debug_artifacts(page, username, "fill_login_form_failed", exc)
+                    if isinstance(recovery_status, int):
+                        raise LoginError(
+                            "page_load",
+                            f"填写登录表单失败且认证页面返回 HTTP {recovery_status}: "
+                            f"{_redact_text(exc, [username, password])}",
+                        )
                     raise LoginError("login_page_changed", f"填写登录表单失败: {_redact_text(exc, [username, password])}")
 
                 # Capture captcha image bytes
@@ -900,6 +1110,7 @@ def get_token(
                 # Click login
                 logger.debug("账号 %s: 提交表单中...", _debug_user_id(username))
                 redirect_target = None
+                login_status = None
                 try:
                     with page.expect_response(
                         lambda response: getattr(response.request, "method", "") == "POST"
@@ -909,11 +1120,20 @@ def get_token(
                         submit_button_locator(page).click(
                             timeout=_browser_timeout_ms(timeout, deadline)
                         )
-                    redirect_target = (login_response.value.headers or {}).get("location")
+                    login_status = _http_status(login_response.value)
+                    redirect_target = _absolute_redirect_target(
+                        login_response.value,
+                        (login_response.value.headers or {}).get("location"),
+                    )
+                    if login_status == 400:
+                        logger.warning(
+                            "账号 %s: 登录 POST 返回 HTTP 400，符合统一认证前置拦截特征。",
+                            _debug_user_id(username),
+                        )
                     logger.debug(
                         "账号 %s: 登录响应 HTTP %s，跳转目标 %s",
                         _debug_user_id(username),
-                        login_response.value.status,
+                        login_status,
                         "已获取" if redirect_target else "缺失",
                     )
                 except Exception as exc:
@@ -924,6 +1144,7 @@ def get_token(
                         _debug_user_id(username),
                         _redact_text(exc),
                     )
+                last_login_status = login_status
 
                 if redirect_target:
                     # The successful login response re-issues the device
@@ -932,22 +1153,7 @@ def get_token(
                     # bouncing back to the login form.  Clear them right away
                     # and request the target over HTTPS so the authenticated
                     # session survives the hop.
-                    _drop_federation_cookies(context, login_host, username)
-                    target = redirect_target
-                    if target.startswith("http://"):
-                        target = "https://" + target[len("http://"):]
-                    try:
-                        page.goto(
-                            target,
-                            wait_until="domcontentloaded",
-                            timeout=_browser_timeout_ms(timeout, deadline),
-                        )
-                    except Exception as exc:
-                        logger.debug(
-                            "账号 %s: 直接完成登录跳转失败：%s",
-                            _debug_user_id(username),
-                            _redact_text(exc),
-                        )
+                    _complete_oauth_hop(page, context, username, redirect_target, timeout, deadline)
 
                 # Wait for an explicit portal-host ticket/token condition.
                 # Waiting for network quiescence is both slower and brittle on
@@ -960,7 +1166,12 @@ def get_token(
                     timeout if redirect_target else min(5, timeout),
                     deadline=deadline,
                 )
-                if not redirected and redirect_target:
+                hop_accepted = redirect_target is not None or (
+                    login_status is not None and 300 <= login_status < 400
+                )
+                if not redirected and hop_accepted:
+                    # The login response looked accepted, so re-drive the hop
+                    # even when it carried no usable Location.
                     redirected = _recover_blocked_oauth_hop(
                         page,
                         context,
@@ -982,17 +1193,18 @@ def get_token(
                     break
 
                 # Check for visible error message
-                error_msg = ""
-                try:
-                    error_msg = page.evaluate("() => { const el = document.querySelector('.pop .ctnTxt, .error, #error, .errorMessage, #errorMessage, .messager-body'); return el ? el.innerText : ''; }")
-                except Exception:
-                    pass
+                # The dialog can appear a moment after the response, and a
+                # dismissed one stays in the DOM, so this waits briefly and
+                # only reports nodes that are actually visible.
+                error_msg = read_login_error_message(page, timeout, deadline=deadline).strip()
 
                 if error_msg:
-                    error_msg = error_msg.strip()
                     safe_error_msg = _redact_text(error_msg, [username, password])
                     logger.warning("账号 %s: 登录页面返回错误信息: %s", _debug_user_id(username), safe_error_msg)
-                    if any(k in error_msg for k in ["密码", "账户", "用户名", "密码错误", "不正确"]):
+                    # A rejected password login surfaces as the same generic
+                    # text, so keep it out of the captcha bucket and let the
+                    # user check the credentials instead.
+                    if any(k in error_msg for k in ["密码", "账户", "用户名", "动态口令", "不正确"]):
                         if "验证码" not in error_msg:
                             raise LoginError("credential", f"账号或密码错误: {safe_error_msg}")
 
@@ -1014,7 +1226,10 @@ def get_token(
 
             if not success:
                 save_login_debug_artifacts(page, username, "captcha_or_redirect_failed")
-                raise LoginError("captcha", "验证码连续识别失败，或登录服务没有完成跳转")
+                raise LoginError(
+                    _login_failure_reason(last_login_status),
+                    "验证码连续识别失败，或登录服务没有完成跳转",
+                )
 
             # Extract token from localStorage.  The explicit ticket/token
             # condition above means no network-idle wait is needed here.

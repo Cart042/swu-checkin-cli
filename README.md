@@ -110,7 +110,7 @@ python check_in.py -m
 
 工作流保留每天北京时间 21:05 的定时触发、手动触发和并发保护。手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
 
-工作流使用 Python 3.11、浏览器登录和 Chromium headless shell。网络或登录页偶发异常时，优先手动重跑，再下载调试 artifact 查看页面结构变化。
+工作流使用 Python 3.11、浏览器登录和 Chromium headless shell。网络或登录页偶发异常时，优先手动重跑，再下载调试 artifact 查看页面结构变化。登录链路的已知失败特征、设备 Cookie 规则和失败原因对照见 [docs/login-troubleshooting.md](docs/login-troubleshooting.md)。
 
 仓库另有 `Runtime PR CI` 工作流。它安装完整 `requirements.txt`，执行 Python 源码编译、离线单元测试、命令行帮助检查和运行时冒烟检查，不登录学校网站、不执行签到，也不需要真实账号。冒烟检查在 `127.0.0.1` 启动本地页面，用无 channel 的 headless Chromium 打开页面，再初始化 ddddocr 并识别仓库内置的合成验证码图片。浏览器和 OCR 初始化需要更多资源，因此该命令单独放在普通单元测试之外。
 
@@ -174,6 +174,7 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 | `SWU_RUN_DEADLINE_SECONDS` | 单次任务总时限，默认 `900` 秒 |
 | `SWU_LOG_LEVEL` | 日志级别，默认 `INFO`；可选 `DEBUG`、`WARNING`、`ERROR` |
 | `SWU_DEBUG_DIR` | 登录异常调试目录；仅排查问题时设置，例如 `debug` |
+| `SWU_LOGIN_UA` | 覆盖浏览器登录使用的 User-Agent；默认按运行中浏览器版本和当前平台生成 |
 | `SWU_PUSH_DEADLINE_SECONDS` | 本次推送共享总预算，默认 `60` 秒，允许范围 `1-3600` 秒 |
 | `PUSH_TELEGRAM_BOT_TOKEN` | Telegram Bot Token；需与 Chat ID 同时设置 |
 | `PUSH_TELEGRAM_CHAT_ID` | Telegram 接收消息的 Chat ID；需与 Bot Token 同时设置 |
@@ -210,7 +211,6 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 ├── config.py               # 账号来源、校验、dotenv 和本地配置文件
 ├── menu.py                 # 数字配置菜单
 ├── get_info.py             # 浏览器登录、验证码和 Token
-├── login.py                # 延迟加载浏览器登录依赖
 ├── cache.py                # Token 缓存读写
 ├── school_api.py           # 学校 HTTP 会话、请求和接口数据
 ├── notify.py               # 推送渠道
@@ -218,6 +218,7 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 ├── scripts/smoke_runtime.py # 本地 Chromium + ddddocr 运行时冒烟检查
 ├── scripts/profile_login.py # 交互式只读登录和缓存性能测量（不执行签到）
 ├── docs/performance.md      # 性能测量方法、限制和安全说明
+├── docs/login-troubleshooting.md # 统一认证失败特征、设备 Cookie 规则与失败原因对照
 ├── Dockerfile              # Python 3.11 + Playwright 镜像
 ├── docker-compose.yml      # Docker Compose 配置
 ├── FILES.md                # 文件用途说明
