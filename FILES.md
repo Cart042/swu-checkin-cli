@@ -29,8 +29,17 @@
 | `src/swu_checkin/checkin_service.py` | 单账号签到流程、请假状态、任务查询、提交复查和结果状态映射。 |
 | `src/swu_checkin/runner.py` | 多账号并发、有限重试、deadline 和结果汇总。 |
 | `src/swu_checkin/notify.py` | 钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。 |
-| `src/swu_checkin/login.py` | 浏览器登录、验证码识别、脱敏登录诊断文本和 Token 获取。 |
 | `src/swu_checkin/api/school.py` | 学校 HTTP 会话、网络诊断、请求重试和学校接口数据；不依赖浏览器。 |
+| `src/swu_checkin/auth/flow.py` | 浏览器登录状态机：入口 → CAS → IDM 表单 → 验证码 → 提交 → Portal → Token，并打印阶段标记。 |
+| `src/swu_checkin/auth/browser.py` | Playwright 浏览器会话、登录表单定位、页面恢复和验证码图片抓取。 |
+| `src/swu_checkin/auth/pages.py` | 登录页选择器常量与纯函数判定（表单字段、提示文案、验证码资源）。 |
+| `src/swu_checkin/auth/captcha.py` | 进程内共享的 ddddocr 引擎与串行化分类调用。 |
+| `src/swu_checkin/auth/cookies.py` | CAS 跳转遗留的不透明设备 Cookie 的精确清除。 |
+| `src/swu_checkin/auth/tokens.py` | Token 提取、CAS ticket 交换、身份校验与缓存。 |
+| `src/swu_checkin/auth/urls.py` | 跳转地址与主机名的纯解析函数。 |
+| `src/swu_checkin/auth/debug.py` | 脱敏登录诊断文本（不保存页面内容或截图）。 |
+| `src/swu_checkin/auth/errors.py` | `LoginError` 与 `FailureReason` 失败分类。 |
+| `src/swu_checkin/logging_utils.py` | 日志初始化，CLI 与性能测量脚本共用。 |
 | `src/swu_checkin/cache.py` | Token 缓存的原子读写和进程内并发保护。 |
 | `src/swu_checkin/atomic_io.py` | 私有配置文件的原子写入：临时文件先降权，再 flush、fsync 和 replace。 |
 | `scripts/smoke_runtime.py` | 独立运行时冒烟检查：启动本地页面和无 channel 的 headless Chromium，并用合成无敏感图片验证 ddddocr；不访问学校网络或执行签到。 |
@@ -38,6 +47,8 @@
 | `docs/performance.md` | 性能测量命令、采样口径、凭据安全和当前环境限制说明。 |
 | `docs/login-troubleshooting.md` | 统一认证链路的已知失败特征、设备 Cookie 规则、可调开关与登录失败原因对照。 |
 | `tests/__init__.py` | 测试包引导：把 `src` 加入 `sys.path`，让未安装的检出目录也能运行同一份代码。 |
+| `tests/fixtures/login/` | 脱敏登录页、跳转地址、`exchange-token` 响应、`localStorage` 与 Cookie 样本，用于回归选择器与分类逻辑。 |
+| `tests/test_login_fixtures.py` | 用脱敏样本驱动登录链解析与分类的回归测试，不访问网络。 |
 | `tests/test_check_in.py` | 不访问网络的签到、配置和重试边界测试。 |
 | `tests/test_config.py` | 账号优先级、dotenv 加载和配置错误测试。 |
 | `tests/test_menu.py` | 不访问网络的菜单文件操作测试。 |

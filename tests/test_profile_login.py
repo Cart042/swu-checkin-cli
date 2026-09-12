@@ -87,7 +87,7 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
                     process.stdout.close()
 
     def test_warm_cache_miss_forbids_browser_fallback(self):
-        fake_get_info = types.ModuleType("swu_checkin.login")
+        fake_get_info = types.ModuleType("swu_checkin.auth.flow")
         fake_school_api = types.ModuleType("swu_checkin.api.school")
         session = _FakeSession()
         fake_get_info._browser_login_slot = object()
@@ -108,7 +108,7 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
             mock.patch.dict(
                 sys.modules,
                 {
-                    "swu_checkin.login": fake_get_info,
+                    "swu_checkin.auth.flow": fake_get_info,
                     "swu_checkin.api.school": fake_school_api,
                 },
             ),
@@ -142,7 +142,7 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
 
         for reason in ("page_load", "sensitive response text", ["not a string"]):
             with self.subTest(reason=reason):
-                fake_login = types.ModuleType("swu_checkin.login")
+                fake_login = types.ModuleType("swu_checkin.auth.flow")
                 fake_login.get_token = mock.Mock(side_effect=LoginFailure(reason))
                 fake_api = types.ModuleType("swu_checkin.api.school")
                 session = _FakeSession()
@@ -154,7 +154,7 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
                     mock.patch.dict(
                         sys.modules,
                         {
-                            "swu_checkin.login": fake_login,
+                            "swu_checkin.auth.flow": fake_login,
                             "swu_checkin.api.school": fake_api,
                         },
                     ),

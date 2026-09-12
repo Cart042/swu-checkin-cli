@@ -1,0 +1,10 @@
+{
+  "_comment": "设备 Cookie 未清除时 exchange-token 被认证服务拦截的响应结构。",
+  "blocked": {
+    "ok": false,
+    "status": 400,
+    "data": null,
+    "text": "<!doctype html><html><head><title>400</title></head><body><h1>Bad Request</h1></body></html>"
+  },
+  "unexpected_shape": "not-a-dict"
+}

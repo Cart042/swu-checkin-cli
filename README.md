@@ -240,9 +240,10 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 │   ├── runner.py           # 多账号并发、重试和汇总
 │   ├── notify.py           # 推送渠道
 │   ├── cache.py            # Token 缓存读写
-│   ├── login.py            # 浏览器登录、验证码和 Token
 │   ├── atomic_io.py        # 私有配置文件的原子写入
-│   └── api/school.py       # 学校 HTTP 会话、请求和接口数据
+│   ├── logging_utils.py    # 日志初始化
+│   ├── api/school.py       # 学校 HTTP 会话、请求和接口数据
+│   └── auth/               # 登录链：flow / browser / captcha / cookies / tokens / pages
 ├── scripts/smoke_runtime.py # 本地 Chromium + ddddocr 运行时冒烟检查
 ├── scripts/profile_login.py # 交互式只读登录和缓存性能测量（不执行签到）
 ├── docs/performance.md      # 性能测量方法、限制和安全说明
@@ -251,6 +252,7 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 ├── docker-compose.yml      # Docker Compose 配置
 ├── FILES.md                # 文件用途说明
 ├── requirements.txt        # Python 依赖
+├── tests/fixtures/login/    # 脱敏登录页、跳转、Token 与 Cookie 样本
 ├── tests/test_config.py     # 账号优先级、dotenv 和配置错误测试
 ├── tests/test_menu.py       # 菜单文件操作测试
 ├── users.json.example      # 多账号示例

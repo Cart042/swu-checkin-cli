@@ -391,7 +391,7 @@ def main(argv=None) -> int:
 
     try:
         from . import checkin_service
-        from .login import setup_logging
+        from .logging_utils import setup_logging
     except ImportError as exc:
         logger.error("签到运行依赖未安装或不可用：%s", exc)
         logger.error("请先安装 requirements.txt 中的依赖；--check-config 可离线检查。")

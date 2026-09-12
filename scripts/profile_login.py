@@ -278,7 +278,7 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
             # ``import_module`` consults ``sys.modules`` directly, so the
             # offline tests can substitute both modules without touching the
             # real package attributes.
-            get_info = _import_module("swu_checkin.login")
+            get_info = _import_module("swu_checkin.auth.flow")
             school_api = _import_module("swu_checkin.api.school")
             create_school_session = school_api.create_school_session
             get_student_id = school_api.get_student_id

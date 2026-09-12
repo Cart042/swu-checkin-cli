@@ -8,7 +8,8 @@ import types
 import unittest
 from unittest import mock
 
-from swu_checkin import login as get_info, runner
+from swu_checkin import runner
+from swu_checkin.auth import browser, captcha
 
 
 class RuntimeResourceTests(unittest.TestCase):
@@ -34,14 +35,13 @@ class RuntimeResourceTests(unittest.TestCase):
                         state["active"] -= 1
 
         fake_module = types.SimpleNamespace(DdddOcr=FakeOcr)
-        original_ocr = get_info._ocr_instance
+        original_ocr = captcha._ocr_instance
         try:
-            get_info._ocr_instance = None
+            captcha._ocr_instance = None
             with mock.patch.dict(sys.modules, {"ddddocr": fake_module}):
                 results = []
                 threads = [
-                    threading.Thread(target=lambda: results.append(get_info.classify_captcha(b"ABCD")))
-                    for _ in range(8)
+                    threading.Thread(target=lambda: results.append(captcha.classify_captcha(b"ABCD"))) for _ in range(8)
                 ]
                 for thread in threads:
                     thread.start()
@@ -52,13 +52,13 @@ class RuntimeResourceTests(unittest.TestCase):
             self.assertEqual(state["max_active"], 1)
             self.assertEqual(results, ["ABCD"] * 8)
         finally:
-            get_info._ocr_instance = original_ocr
+            captcha._ocr_instance = original_ocr
 
     def test_browser_login_slot_releases_on_error(self):
         semaphore = threading.BoundedSemaphore(1)
-        with mock.patch.object(get_info, "_browser_login_semaphore", semaphore):
+        with mock.patch.object(browser, "_browser_login_semaphore", semaphore):
             with self.assertRaises(RuntimeError):
-                with get_info._browser_login_slot():
+                with browser._browser_login_slot():
                     raise RuntimeError("login failed")
             acquired = semaphore.acquire(blocking=False)
             self.assertTrue(acquired)
@@ -78,11 +78,11 @@ class RuntimeResourceTests(unittest.TestCase):
 
         semaphore = NeverAvailableSemaphore()
         with (
-            mock.patch.object(get_info, "_browser_login_semaphore", semaphore),
-            mock.patch.object(get_info, "_remaining_seconds", return_value=0.25),
+            mock.patch.object(browser, "_browser_login_semaphore", semaphore),
+            mock.patch.object(browser, "_remaining_seconds", return_value=0.25),
         ):
-            with self.assertRaises(get_info.DeadlineExceeded):
-                get_info._acquire_browser_login(deadline=123.0)
+            with self.assertRaises(browser.DeadlineExceeded):
+                browser._acquire_browser_login(deadline=123.0)
         self.assertEqual(semaphore.timeout, 0.25)
 
     def test_retry_rounds_reuse_one_executor(self):

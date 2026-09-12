@@ -1,0 +1,8 @@
+{
+  "_comment": "门户 localStorage 导出；access_token 与刷新/身份 Token 均为占位值，用于确认优先取 access_token。",
+  "refresh_token": "example-not-real-refresh-token",
+  "id_token": "example-not-real-id-token",
+  "auth": "example-not-real-auth-value",
+  "vuex": "{\"user\":{\"access_token\":\"example-not-real-access-token\",\"name\":\"example\"}}",
+  "expected_token": "example-not-real-access-token"
+}

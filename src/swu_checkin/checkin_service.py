@@ -23,7 +23,7 @@ from .api.school import (
     get_transition_today,
     request_with_retry,
 )
-from .login import get_token
+from .auth.flow import get_token
 from .status import LOGIN_REASON_STATUS, STATUS_MESSAGES
 
 logger = logging.getLogger("swu.check_in")

@@ -1,0 +1,23 @@
+{
+  "_comment": "exchange-token 成功响应的三种已观测形态；Token 为占位值。",
+  "bare_string": {
+    "ok": true,
+    "status": 200,
+    "data": "example-not-real-access-token",
+    "text": "\"example-not-real-access-token\""
+  },
+  "data_wrapper": {
+    "ok": true,
+    "status": 200,
+    "data": { "data": "example-not-real-access-token" },
+    "text": "{\"data\":\"example-not-real-access-token\"}"
+  },
+  "loose_key": {
+    "ok": true,
+    "status": 200,
+    "data": null,
+    "access_token": "example-not-real-access-token",
+    "text": "{\"access_token\":\"example-not-real-access-token\"}"
+  },
+  "expected_token": "example-not-real-access-token"
+}
