@@ -70,7 +70,7 @@ def menu_add_account(
 ) -> None:
     directory = config.get_config_dir(config_dir)
     accounts = config.load_users_file(directory)
-    username = prompt_non_empty("请输入校园网账号：")
+    username = prompt_non_empty("请输入教务系统（校园网）账户名（不是学号）：")
     if any(account["username"] == username for account in accounts):
         print("这个账号已经存在。")
         return
@@ -98,7 +98,7 @@ def create_accounts_wizard(
     accounts: list[dict[str, str]] = []
     while True:
         print(f"\n--- 添加第 {len(accounts) + 1} 个账号 ---")
-        username = input("请输入校园网账号（学工号）: ").strip()
+        username = input("请输入教务系统（校园网）账户名（不是学号）: ").strip()
         if not username:
             print("账号不能为空，请重新输入。")
             continue

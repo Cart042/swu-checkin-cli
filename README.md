@@ -74,6 +74,8 @@ swu-checkin --check-network
 3. `SWU_USERS` 环境变量中的 JSON 数组。
 4. `SWU_USERNAME` / `SWU_PASSWORD`。
 
+这里的账号填的是**教务系统（校园网 / 统一认证）的账户名和密码**，不是学号——登录页要求的就是你在统一认证里使用的那个账户名。
+
 账号来源按顺序使用第一个有效的非空配置；已经存在但格式错误的高优先级来源会直接报错，不会静默改用低优先级来源。`.env` 会在读取这些来源前加载，进程环境变量（例如 GitHub Actions Secrets）优先于 `.env`。
 
 `users.json` 示例：
@@ -81,11 +83,11 @@ swu-checkin --check-network
 ```json
 [
   {
-    "username": "你的校园网账号",
+    "username": "你的教务系统（校园网）账户名",
     "password": "你的密码"
   },
   {
-    "username": "另一个校园网账号",
+    "username": "另一个教务系统（校园网）账户名",
     "password": "另一个密码"
   }
 ]
@@ -114,11 +116,20 @@ swu-checkin -m
 
 工作流文件是 `.github/workflows/swu-check.yml`。运行前，在仓库的 **Settings → Secrets and variables → Actions** 中添加：
 
-- `SWU_USERNAME`
-- `SWU_PASSWORD`
+- `SWU_USERNAME`：教务系统（校园网 / 统一认证）的账户名，**不是学号**
+- `SWU_PASSWORD`：同一个账户的校园网密码
 - 需要使用的推送渠道 Secret：`PUSH_DINGTALK_TOKEN`、`PUSH_DINGTALK_SECRET`、`PUSH_QYWX_KEY`、`PUSH_BARK_KEY`、`PUSH_BARK_URL`、`PUSH_SERVERCHAN_KEY`、`PUSH_PUSHDEER_KEY`
 - `PUSH_TELEGRAM_BOT_TOKEN`（可选）
 - `PUSH_TELEGRAM_CHAT_ID`（可选）
+
+也可以用命令行写入（注意 `SWU_USERNAME` 是账户名，不是学号）：
+
+```bash
+gh secret set SWU_USERNAME --body '<教务系统（校园网）账户名>'
+gh secret set SWU_PASSWORD --body '<校园网密码>'
+```
+
+仓库里没有配置这两个 Secret 时，runner 里的 `SWU_USERNAME` / `SWU_PASSWORD` 是空值，工作流会停在配置检查并报 `[FAIL] 账号配置：未找到可用账号`。
 
 ### 定时打卡需要显式开启
 
@@ -186,7 +197,7 @@ SWU_UID=$(id -u) SWU_GID=$(id -g) docker compose run --rm swu-checkin
 也可以通过环境变量传入单个账号：
 
 ```bash
-SWU_USERNAME=your_username SWU_PASSWORD=your_password \
+SWU_USERNAME=your_campus_account SWU_PASSWORD=your_password \
   docker compose run --rm swu-checkin
 ```
 
@@ -236,7 +247,7 @@ Telegram 需要同时填写 Bot Token 和 Chat ID；菜单支持设置、修改�
 
 | 变量 | 说明 |
 | --- | --- |
-| `SWU_USERNAME` / `SWU_PASSWORD` | 单账号用户名和密码 |
+| `SWU_USERNAME` / `SWU_PASSWORD` | 教务系统（校园网 / 统一认证）的账户名和密码；账户名不是学号 |
 | `SWU_USERS` | 多账号 JSON 数组 |
 | `SWU_CONFIG_DIR` | 配置目录，默认脚本目录；Docker 默认 `/data` |
 | `SWU_MAX_WORKERS` | 最大并发线程数，默认 `3` |

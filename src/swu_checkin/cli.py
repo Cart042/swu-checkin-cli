@@ -328,7 +328,7 @@ def build_parser():
         "-u",
         "--username",
         type=str,
-        help="临时的校园网账号（若配置，将忽略 users.json 和环境变量）",
+        help="临时的教务系统（校园网）账户名，不是学号（若配置，将忽略 users.json 和环境变量）",
     )
     parser.add_argument("-p", "--password", type=str, help="临时的校园网密码")
     parser.add_argument(
