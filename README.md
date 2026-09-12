@@ -114,22 +114,35 @@ swu-checkin -m
 
 ## GitHub Actions
 
-工作流文件是 `.github/workflows/swu-check.yml`。运行前，在仓库的 **Settings → Secrets and variables → Actions** 中添加：
+工作流文件是 `.github/workflows/swu-check.yml`。推荐在仓库的 **Settings → Secrets and variables → Actions** 中添加一个 `SWU_USERS` Secret，用一个 JSON 数组保存一个或多个账号：
 
-- `SWU_USERNAME`：教务系统（校园网 / 统一认证）的账户名，**不是学号**
-- `SWU_PASSWORD`：同一个账户的校园网密码
-- 需要使用的推送渠道 Secret：`PUSH_DINGTALK_TOKEN`、`PUSH_DINGTALK_SECRET`、`PUSH_QYWX_KEY`、`PUSH_BARK_KEY`、`PUSH_BARK_URL`、`PUSH_SERVERCHAN_KEY`、`PUSH_PUSHDEER_KEY`
-- `PUSH_TELEGRAM_BOT_TOKEN`（可选）
-- `PUSH_TELEGRAM_CHAT_ID`（可选）
+```json
+[
+  {"username":"account1","password":"password1"},
+  {"username":"account2","password":"password2"}
+]
+```
 
-也可以用命令行写入（注意 `SWU_USERNAME` 是账户名，不是学号）：
+其中 `username` 填教务系统（校园网 / 统一认证）的账户名，**不是学号**。工作流会把整个 `SWU_USERS` Secret 直接交给程序，程序按现有多账号逻辑并发执行签到、只重试失败账号，并在最后汇总所有账号的结果。
+
+为兼容旧配置，工作流仍会读取 `SWU_USERNAME` 和 `SWU_PASSWORD`。如果 `SWU_USERS` 未设置，可以继续只配置这两个 Secret 运行单账号签到；如果同时配置了 `SWU_USERS` 和单账号 Secrets，程序会按账号来源优先级使用 `SWU_USERS`。
+
+需要使用推送时，再按需添加对应 Secret：`PUSH_DINGTALK_TOKEN`、`PUSH_DINGTALK_SECRET`、`PUSH_QYWX_KEY`、`PUSH_BARK_KEY`、`PUSH_BARK_URL`、`PUSH_SERVERCHAN_KEY`、`PUSH_PUSHDEER_KEY`、`PUSH_TELEGRAM_BOT_TOKEN`、`PUSH_TELEGRAM_CHAT_ID`。
+
+也可以使用 GitHub CLI 写入多账号 Secret：
+
+```bash
+gh secret set SWU_USERS --body '[{"username":"account1","password":"password1"},{"username":"account2","password":"password2"}]'
+```
+
+如果只需要单账号，也仍可使用旧方式：
 
 ```bash
 gh secret set SWU_USERNAME --body '<教务系统（校园网）账户名>'
 gh secret set SWU_PASSWORD --body '<校园网密码>'
 ```
 
-仓库里没有配置这两个 Secret 时，runner 里的 `SWU_USERNAME` / `SWU_PASSWORD` 是空值，工作流会停在配置检查并报 `[FAIL] 账号配置：未找到可用账号`。
+如果 `SWU_USERS`、`SWU_USERNAME` 和 `SWU_PASSWORD` 都没有提供可用账号，工作流会停在配置检查并报 `[FAIL] 账号配置：未找到可用账号`。
 
 ### 开启 / 关闭每日自动打卡
 
@@ -145,7 +158,7 @@ gh workflow disable swu-check.yml   # 完全关闭：定时和手动都不再触
 - 这个状态保存在 GitHub 上，不在仓库里。GitHub 会在仓库长期不活跃后自动停用定时工作流（本项目就遇到过：`main` 从 6 月 30 日起没有提交，定时打卡在 8 月 29 日——正好 60 天后——被停掉），所以一段时间没收到打卡记录时，先来 Actions 页面确认工作流还是 enabled。
 - **被禁用的工作流连手动触发也不可用**（GitHub 会返回 `HTTP 422: Cannot trigger a 'workflow_dispatch' on a disabled workflow`）。只想临时补一次打卡时，先 `enable`、跑完再 `disable`。
 
-> **Fork 本项目的用户注意**：GitHub 默认不在 fork 里运行定时工作流，而且 Secrets 不会随 fork 复制过来。要让它工作必须自己动手两步：① 在 fork 的 Actions 页面点 **Enable workflow** 启用 `SWU Check-in`，否则定时任务永远不会触发；② 按上面的说明配置自己的 `SWU_USERNAME` / `SWU_PASSWORD`。启用后每天北京时间 21:05 自动打卡，也可以用 **Run workflow** 手动跑一次。
+> **Fork 本项目的用户注意**：GitHub 默认不在 fork 里运行定时工作流，而且 Secrets 不会随 fork 复制过来。要让它工作必须自己动手两步：① 在 fork 的 Actions 页面点 **Enable workflow** 启用 `SWU Check-in`，否则定时任务永远不会触发；② 按上面的说明配置自己的 `SWU_USERS`，或者使用 `SWU_USERNAME` / `SWU_PASSWORD` 配置单账号。启用后每天北京时间 21:05 自动打卡，也可以用 **Run workflow** 手动跑一次。
 
 手动触发时可以勾选 `debug`，仅在排查登录页问题时保存脱敏文本调试信息；默认不启用调试。调试 artifact 保留 3 天，文件中不应包含真实密码或验证码。
 
