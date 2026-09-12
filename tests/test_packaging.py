@@ -13,6 +13,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 # 这两个文件只存在于仓库检出里，不会进 sdist；发布出去的源码包仍然要能跑测试，
 # 所以依赖它们的仓库级断言在 sdist 中跳过。
 PR_CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pr-ci.yml"
+CHECKIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "swu-check.yml"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 
 
@@ -98,6 +99,15 @@ class PackagingMetadataTests(unittest.TestCase):
         # 非 root 用户必须能在共享路径找到 Chromium。
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright", dockerfile)
         self.assertIn('CMD ["python", "check_in.py"]', dockerfile)
+
+    @unittest.skipUnless(CHECKIN_WORKFLOW.is_file(), "只有仓库检出才带签到工作流")
+    def test_scheduled_check_in_requires_the_explicit_enable_switch(self):
+        # 每天自动打卡必须先手动打开仓库变量开关，未开启时定时运行不得打卡；
+        # 手动触发要一直可用，方便临时补打卡。这条用例防止后续改动把开关去掉。
+        workflow = CHECKIN_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("- cron:", workflow)
+        self.assertIn("vars.SWU_CHECKIN_ENABLED == 'true'", workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch' ||", workflow)
 
     def test_sdist_manifest_keeps_the_repo_self_testable(self):
         # setuptools 默认只把 tests/test*.py 放进 sdist，不会带 tests/fixtures/，
