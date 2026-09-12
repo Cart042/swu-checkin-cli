@@ -9,7 +9,7 @@
 | `.github/ISSUE_TEMPLATE/feature_request.yml` | GitHub 功能建议模板。 |
 | `.github/PULL_REQUEST_TEMPLATE.md` | Pull Request 模板，提醒说明变更、验证和敏感信息检查。 |
 | `.github/workflows/swu-check.yml` | GitHub Actions 定时和手动签到工作流，使用缓存的 Python 依赖和 Chromium headless shell 登录；手动调试开关启用时上传短期保留的脱敏文本 artifact。 |
-| `.github/workflows/pr-ci.yml` | Pull Request 运行时检查，按 `requirements.txt` 缓存并安装完整依赖，运行 Python 源码编译、单元测试、命令行帮助和本地运行时冒烟，不访问学校网站。 |
+| `.github/workflows/pr-ci.yml` | Pull Request 检查，分为 Ruff 检查、mypy 类型检查、Python 3.11/3.12 离线单元测试和运行时冒烟四个 job；公开仓库只在 GitHub 托管 runner 上运行，不访问学校网站。 |
 | `.dockerignore` | 排除账号、环境变量、Token 缓存、日志、调试文件、运行锁、Git 元数据和 Python 缓存，避免进入镜像。 |
 | `.env.example` | 环境变量模板，包含账号、多账号、并发、重试、按需调试和推送配置示例。 |
 | `.gitignore` | 忽略账号、`.env`、Token 缓存、日志、调试目录、运行锁、Python 缓存和原子写入临时文件。 |
