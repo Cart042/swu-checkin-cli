@@ -8,8 +8,9 @@ import types
 import unittest
 from unittest import mock
 
-import get_info
-import runner
+from swu_checkin import runner
+from swu_checkin.auth import browser, captcha
+from swu_checkin.status import CheckinStatus
 
 
 class RuntimeResourceTests(unittest.TestCase):
@@ -35,16 +36,13 @@ class RuntimeResourceTests(unittest.TestCase):
                         state["active"] -= 1
 
         fake_module = types.SimpleNamespace(DdddOcr=FakeOcr)
-        original_ocr = get_info._ocr_instance
+        original_ocr = captcha._ocr_instance
         try:
-            get_info._ocr_instance = None
+            captcha._ocr_instance = None
             with mock.patch.dict(sys.modules, {"ddddocr": fake_module}):
                 results = []
                 threads = [
-                    threading.Thread(
-                        target=lambda: results.append(get_info.classify_captcha(b"ABCD"))
-                    )
-                    for _ in range(8)
+                    threading.Thread(target=lambda: results.append(captcha.classify_captcha(b"ABCD"))) for _ in range(8)
                 ]
                 for thread in threads:
                     thread.start()
@@ -55,13 +53,13 @@ class RuntimeResourceTests(unittest.TestCase):
             self.assertEqual(state["max_active"], 1)
             self.assertEqual(results, ["ABCD"] * 8)
         finally:
-            get_info._ocr_instance = original_ocr
+            captcha._ocr_instance = original_ocr
 
     def test_browser_login_slot_releases_on_error(self):
         semaphore = threading.BoundedSemaphore(1)
-        with mock.patch.object(get_info, "_browser_login_semaphore", semaphore):
+        with mock.patch.object(browser, "_browser_login_semaphore", semaphore):
             with self.assertRaises(RuntimeError):
-                with get_info._browser_login_slot():
+                with browser._browser_login_slot():
                     raise RuntimeError("login failed")
             acquired = semaphore.acquire(blocking=False)
             self.assertTrue(acquired)
@@ -80,11 +78,12 @@ class RuntimeResourceTests(unittest.TestCase):
                 raise AssertionError("a failed acquire must not release")
 
         semaphore = NeverAvailableSemaphore()
-        with mock.patch.object(get_info, "_browser_login_semaphore", semaphore), mock.patch.object(
-            get_info, "_remaining_seconds", return_value=0.25
+        with (
+            mock.patch.object(browser, "_browser_login_semaphore", semaphore),
+            mock.patch.object(browser, "_remaining_seconds", return_value=0.25),
         ):
-            with self.assertRaises(get_info.DeadlineExceeded):
-                get_info._acquire_browser_login(deadline=123.0)
+            with self.assertRaises(browser.DeadlineExceeded):
+                browser._acquire_browser_login(deadline=123.0)
         self.assertEqual(semaphore.timeout, 0.25)
 
     def test_retry_rounds_reuse_one_executor(self):
@@ -97,29 +96,35 @@ class RuntimeResourceTests(unittest.TestCase):
             calls.append(username)
             return 10 if calls.count(username) == 1 else 0
 
-        with mock.patch.dict(
-            os.environ,
-            {
-                "SWU_MAX_WORKERS": "2",
-                "SWU_MAX_ROUNDS": "2",
-                "SWU_RETRY_INTERVAL_SECONDS": "1",
-                "SWU_RUN_DEADLINE_SECONDS": "30",
-            },
-            clear=False,
-        ), mock.patch.object(runner, "ThreadPoolExecutor", wraps=runner.ThreadPoolExecutor) as executor:
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SWU_MAX_WORKERS": "2",
+                    "SWU_MAX_ROUNDS": "2",
+                    "SWU_RETRY_INTERVAL_SECONDS": "1",
+                    "SWU_RUN_DEADLINE_SECONDS": "30",
+                },
+                clear=False,
+            ),
+            mock.patch.object(runner, "ThreadPoolExecutor", wraps=runner.ThreadPoolExecutor) as executor,
+        ):
             summary, exit_code, results = runner.run_accounts(
                 [{"username": "alice", "password": "pw"}],
                 checkin_func=checkin,
                 validate_accounts=validate,
-                status_messages={0: "ok", 10: "temporary"},
-                retryable_statuses={10},
-                terminal_success_statuses={0},
+                status_messages={
+                    CheckinStatus.NO_TASK: "ok",
+                    CheckinStatus.SCHOOL_API_ERROR: "temporary",
+                },
+                retryable_statuses={CheckinStatus.SCHOOL_API_ERROR},
+                terminal_success_statuses={CheckinStatus.NO_TASK},
                 sleep_func=lambda _seconds: None,
             )
 
         self.assertEqual(executor.call_count, 1)
         self.assertEqual(exit_code, 0)
-        self.assertTrue(results["alice"][1])
+        self.assertTrue(results["alice"].ok)
         self.assertIn("总轮次: 2 轮", summary)
 
 

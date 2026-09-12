@@ -14,20 +14,37 @@ import argparse
 import contextlib
 import errno
 import getpass
+import importlib
 import io
 import json
 import math
 import os
-from pathlib import Path
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-
+from pathlib import Path
+from typing import Any, TypedDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# 与 check_in.py / tests/__init__.py 使用同一份源码路径引导。
+SRC_DIR = REPO_ROOT / "src"
+
+
+def _import_module(name: str) -> Any:
+    """Import *name* through ``sys.modules``.
+
+    Importing by name keeps the offline tests able to substitute
+    ``types.ModuleType`` doubles for the login and school-API modules.  The
+    return type is intentionally untyped: the worker patches private login
+    attributes that only exist at runtime.
+    """
+
+    return importlib.import_module(name)
+
+
 SAMPLE_INTERVAL_SECONDS = 0.05
 MAX_TIMEOUT_SECONDS = 300.0
 
@@ -42,9 +59,7 @@ def _timeout_value(value: str) -> float:
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError("超时必须是有限的正数") from exc
     if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TIMEOUT_SECONDS:
-        raise argparse.ArgumentTypeError(
-            f"超时必须大于 0 且不超过 {MAX_TIMEOUT_SECONDS:g} 秒"
-        )
+        raise argparse.ArgumentTypeError(f"超时必须大于 0 且不超过 {MAX_TIMEOUT_SECONDS:g} 秒")
     return timeout
 
 
@@ -103,12 +118,22 @@ def _descendants(root_pid: int) -> set[int]:
     return found
 
 
-def _sample_process_tree(root_pid: int, peak: dict[str, object]) -> None:
+class _PeakRecord(TypedDict):
+    """Sampled process-tree measurements for one scenario."""
+
+    peak_tree_rss_kib: int
+    peak_process_rss_kib: int
+    sample_count: int
+    browser_pids: set[int]
+    observed_pids: set[int]
+
+
+def _sample_process_tree(root_pid: int, peak: _PeakRecord) -> None:
     pids = _descendants(root_pid)
     tree_rss_kib = 0
     process_rss_kib = 0
-    browser_pids: set[int] = peak["browser_pids"]  # type: ignore[assignment]
-    observed_pids: set[int] = peak["observed_pids"]  # type: ignore[assignment]
+    browser_pids = peak["browser_pids"]
+    observed_pids = peak["observed_pids"]
     for pid in pids:
         _, rss_kib = _proc_status(pid)
         if rss_kib is not None:
@@ -125,9 +150,9 @@ def _sample_process_tree(root_pid: int, peak: dict[str, object]) -> None:
         ):
             browser_pids.add(pid)
 
-    peak["peak_tree_rss_kib"] = max(int(peak["peak_tree_rss_kib"]), tree_rss_kib)
-    peak["peak_process_rss_kib"] = max(int(peak["peak_process_rss_kib"]), process_rss_kib)
-    peak["sample_count"] = int(peak["sample_count"]) + 1
+    peak["peak_tree_rss_kib"] = max(peak["peak_tree_rss_kib"], tree_rss_kib)
+    peak["peak_process_rss_kib"] = max(peak["peak_process_rss_kib"], process_rss_kib)
+    peak["sample_count"] = peak["sample_count"] + 1
 
 
 def _process_group_exists(pgid: int) -> bool:
@@ -145,9 +170,7 @@ def _process_group_exists(pgid: int) -> bool:
         # EPERM means the group exists but cannot be inspected with the
         # current permissions.  Treat other errors conservatively as present
         # so cleanup still attempts to terminate it.
-        if exc.errno == errno.ESRCH:
-            return False
-        return True
+        return exc.errno != errno.ESRCH
     return True
 
 
@@ -230,6 +253,8 @@ def _read_worker_stdout(process: subprocess.Popen[str], timeout: float = 5.0) ->
 
 def _worker(scenario: str, config_dir: str, timeout: float) -> int:
     """Run one scenario; credentials arrive through stdin only."""
+    username: str = ""
+    password: str = ""
     try:
         credentials = json.loads(sys.stdin.read())
         username = str(credentials["username"])
@@ -245,15 +270,21 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
     try:
         os.environ["SWU_CONFIG_DIR"] = config_dir
         os.environ["SWU_LOG_LEVEL"] = "CRITICAL"
-        sys.path.insert(0, str(REPO_ROOT))
-        # Import after SWU_CONFIG_DIR is set: get_info resolves its cache path
-        # when imported.  No check-in, leave/change, or notification module is
-        # imported by this worker.
+        sys.path.insert(0, str(SRC_DIR))
+        # Import after SWU_CONFIG_DIR is set: the login facade resolves its
+        # cache path when imported.  No check-in, leave/change, or notification
+        # module is imported by this worker.
         with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
-            import get_info
-            from school_api import create_school_session, get_student_id
+            # ``import_module`` consults ``sys.modules`` directly, so the
+            # offline tests can substitute both modules without touching the
+            # real package attributes.
+            get_info = _import_module("swu_checkin.auth.flow")
+            school_api = _import_module("swu_checkin.api.school")
+            create_school_session = school_api.create_school_session
+            get_student_id = school_api.get_student_id
 
             if scenario == "warm":
+
                 @contextlib.contextmanager
                 def forbid_browser_login(*_args: object, **_kwargs: object):
                     raise WarmCacheMissBrowserError("warm cache miss: browser login forbidden")
@@ -292,8 +323,13 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
         # messages, URLs, or response content.
         reason = getattr(exc, "reason", None)
         if isinstance(reason, str) and reason in {
-            "credential", "page_load", "waf_blocked", "captcha", "token_extract",
-            "login_page_changed", "unknown",
+            "credential",
+            "page_load",
+            "waf_blocked",
+            "captcha",
+            "token_extract",
+            "login_page_changed",
+            "unknown",
         }:
             result["error_reason"] = reason
     finally:
@@ -301,7 +337,8 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
             close = getattr(session, "close", None)
             if close:
                 close()
-        username = password = credentials = None
+        username = password = ""
+        credentials = None
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["ok"] else 1
 
@@ -352,7 +389,7 @@ def _run_scenario(
         start_new_session=True,
     )
     payload = json.dumps({"username": username, "password": password}, ensure_ascii=False)
-    peak: dict[str, object] = {
+    peak: _PeakRecord = {
         "peak_tree_rss_kib": 0,
         "peak_process_rss_kib": 0,
         "sample_count": 0,
@@ -395,12 +432,12 @@ def _run_scenario(
         result.update(
             {
                 "wall_clock_seconds": round(elapsed, 4),
-                "peak_tree_rss_kib": int(peak["peak_tree_rss_kib"]),
-                "peak_process_rss_kib": int(peak["peak_process_rss_kib"]),
-                "browser_process_count": len(peak["browser_pids"]),  # type: ignore[arg-type]
+                "peak_tree_rss_kib": peak["peak_tree_rss_kib"],
+                "peak_process_rss_kib": peak["peak_process_rss_kib"],
+                "browser_process_count": len(peak["browser_pids"]),
                 "sample_interval_ms": int(SAMPLE_INTERVAL_SECONDS * 1000),
-                "sample_count": int(peak["sample_count"]),
-                "observed_process_count": len(peak["observed_pids"]),  # type: ignore[arg-type]
+                "sample_count": peak["sample_count"],
+                "observed_process_count": len(peak["observed_pids"]),
             }
         )
     return result
@@ -455,7 +492,7 @@ def main() -> int:
     finally:
         # Drop references to credentials before the temporary cache directory
         # is removed.  No credential is ever written to that directory.
-        username = password = None
+        username = password = ""
         temporary_dir.cleanup()
 
 

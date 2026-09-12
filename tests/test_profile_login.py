@@ -5,7 +5,6 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -13,8 +12,8 @@ import tempfile
 import time
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
-
 
 PROFILE_LOGIN_PATH = Path(__file__).resolve().parents[1] / "scripts" / "profile_login.py"
 _SPEC = importlib.util.spec_from_file_location("profile_login", PROFILE_LOGIN_PATH)
@@ -88,8 +87,8 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
                     process.stdout.close()
 
     def test_warm_cache_miss_forbids_browser_fallback(self):
-        fake_get_info = types.ModuleType("get_info")
-        fake_school_api = types.ModuleType("school_api")
+        fake_get_info = types.ModuleType("swu_checkin.auth.flow")
+        fake_school_api = types.ModuleType("swu_checkin.api.school")
         session = _FakeSession()
         fake_get_info._browser_login_slot = object()
         fake_get_info._browser_playwright = object()
@@ -104,13 +103,22 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
         fake_school_api.create_school_session = lambda: session
         fake_school_api.get_student_id = lambda *_args, **_kwargs: "unused"
         output = io.StringIO()
-        with tempfile.TemporaryDirectory() as config_dir, mock.patch.dict(
-            sys.modules, {"get_info": fake_get_info, "school_api": fake_school_api}
-        ), mock.patch.object(
-            profile_login.sys,
-            "stdin",
-            io.StringIO(json.dumps({"username": "offline", "password": "secret"})),
-        ), mock.patch.object(profile_login.sys, "stdout", output):
+        with (
+            tempfile.TemporaryDirectory() as config_dir,
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "swu_checkin.auth.flow": fake_get_info,
+                    "swu_checkin.api.school": fake_school_api,
+                },
+            ),
+            mock.patch.object(
+                profile_login.sys,
+                "stdin",
+                io.StringIO(json.dumps({"username": "offline", "password": "secret"})),
+            ),
+            mock.patch.object(profile_login.sys, "stdout", output),
+        ):
             status = profile_login._worker("warm", config_dir, 1.0)
 
         result = json.loads(output.getvalue())
@@ -134,18 +142,30 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
 
         for reason in ("page_load", "sensitive response text", ["not a string"]):
             with self.subTest(reason=reason):
-                fake_login = types.ModuleType("get_info")
+                fake_login = types.ModuleType("swu_checkin.auth.flow")
                 fake_login.get_token = mock.Mock(side_effect=LoginFailure(reason))
-                fake_api = types.ModuleType("school_api")
+                fake_api = types.ModuleType("swu_checkin.api.school")
                 session = _FakeSession()
-                fake_api.create_school_session = lambda: session
+                fake_api.create_school_session = mock.Mock(return_value=session)
                 fake_api.get_student_id = mock.Mock()
                 output = io.StringIO()
-                with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
-                    sys.modules, {"get_info": fake_login, "school_api": fake_api}
-                ), mock.patch.dict(os.environ), mock.patch.object(
-                    profile_login.sys, "stdin", io.StringIO(json.dumps({"username": "offline", "password": "fixture"}))
-                ), mock.patch.object(profile_login.sys, "stdout", output):
+                with (
+                    tempfile.TemporaryDirectory() as directory,
+                    mock.patch.dict(
+                        sys.modules,
+                        {
+                            "swu_checkin.auth.flow": fake_login,
+                            "swu_checkin.api.school": fake_api,
+                        },
+                    ),
+                    mock.patch.dict(os.environ),
+                    mock.patch.object(
+                        profile_login.sys,
+                        "stdin",
+                        io.StringIO(json.dumps({"username": "offline", "password": "fixture"})),
+                    ),
+                    mock.patch.object(profile_login.sys, "stdout", output),
+                ):
                     code = profile_login._worker("cold", directory, 1.0)
                 result = json.loads(output.getvalue())
                 self.assertEqual(code, 1)
@@ -155,8 +175,9 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
                 self.assertTrue(session.closed)
 
     def test_non_linux_main_stops_before_credentials_prompt(self):
-        with mock.patch.object(profile_login.sys, "platform", "darwin"), mock.patch.object(
-            profile_login.getpass, "getpass", side_effect=AssertionError("prompted")
+        with (
+            mock.patch.object(profile_login.sys, "platform", "darwin"),
+            mock.patch.object(profile_login.getpass, "getpass", side_effect=AssertionError("prompted")),
         ):
             with self.assertRaisesRegex(SystemExit, "Linux"):
                 profile_login.main()

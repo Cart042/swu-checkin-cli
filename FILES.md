@@ -9,32 +9,60 @@
 | `.github/ISSUE_TEMPLATE/feature_request.yml` | GitHub 功能建议模板。 |
 | `.github/PULL_REQUEST_TEMPLATE.md` | Pull Request 模板，提醒说明变更、验证和敏感信息检查。 |
 | `.github/workflows/swu-check.yml` | GitHub Actions 定时和手动签到工作流，使用缓存的 Python 依赖和 Chromium headless shell 登录；手动调试开关启用时上传短期保留的脱敏文本 artifact。 |
-| `.github/workflows/pr-ci.yml` | Pull Request 运行时检查，按 `requirements.txt` 缓存并安装完整依赖，运行 Python 源码编译、单元测试、命令行帮助和本地运行时冒烟，不访问学校网站。 |
+| `.github/workflows/pr-ci.yml` | Pull Request 检查，分为 Ruff 检查、mypy 类型检查、Python 3.11/3.12 离线单元测试和运行时冒烟四个 job；公开仓库只在 GitHub 托管 runner 上运行，不访问学校网站。 |
+| `.github/workflows/release.yml` | 推送 `v*` 标签时的发布流程：校验标签与 `pyproject.toml` 版本一致、构建 sdist/wheel、创建 GitHub Release 并推送 GHCR 镜像。 |
+| `.github/workflows/runtime-smoke.yml` | 每天定时（也可手动触发）在完整运行时依赖下跑 Chromium + ddddocr 冒烟检查和 `check_in.py --help`，覆盖依赖与 runner 镜像漂移。 |
+| `.github/dependabot.yml` | 每周检查 Python 依赖、GitHub Actions 和 Docker 基础镜像的更新。 |
 | `.dockerignore` | 排除账号、环境变量、Token 缓存、日志、调试文件、运行锁、Git 元数据和 Python 缓存，避免进入镜像。 |
 | `.env.example` | 环境变量模板，包含账号、多账号、并发、重试、按需调试和推送配置示例。 |
 | `.gitignore` | 忽略账号、`.env`、Token 缓存、日志、调试目录、运行锁、Python 缓存和原子写入临时文件。 |
 | `Dockerfile` | Python 3.11 镜像构建文件，安装依赖和 Playwright Chromium headless shell，默认使用 `/data` 保存配置。 |
 | `LICENSE` | MIT License。 |
 | `README.md` | 安装、账号配置、数字菜单、GitHub Actions、Docker、网络、推送、环境变量和状态码说明。 |
-| `check_in.py` | 主程序入口，负责 CLI、配置检查、运行锁和推送汇总；仅在实际操作时加载签到服务。 |
-| `checkin_service.py` | 单账号签到流程、请假状态、任务查询、提交复查和结果状态映射。 |
-| `status.py` | CLI、runner 与签到服务共用的状态码和登录失败原因文本。 |
-| `config.py` | 账号来源优先级、统一校验、dotenv 加载、账号文件和推送配置读写。 |
-| `menu.py` | 数字配置菜单和交互式账号、并发、推送与缓存操作；不加载浏览器运行时。 |
-| `docker-compose.yml` | Docker Compose 部署配置，挂载 `./data` 到容器 `/data` 并运行一次性签到任务。 |
-| `cache.py` | Token 缓存的原子读写和进程内并发保护。 |
-| `get_info.py` | 浏览器登录、验证码识别、脱敏登录诊断文本和 Token 获取。 |
-| `school_api.py` | 学校 HTTP 会话、网络诊断、请求重试和学校接口数据。 |
-| `notify.py` | 钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。 |
+| `check_in.py` | 兼容入口：把 `src` 加入 `sys.path` 后调用 `swu_checkin.cli.main`，让 `python check_in.py`、Docker 和已有部署脚本继续可用。 |
+| `pyproject.toml` | Python 项目元数据、`swu-checkin` 控制台脚本，以及 Ruff 和 mypy 的共享配置；PR CI 与本地开发使用同一份设置。 |
 | `requirements.txt` | Python 直接运行依赖列表，供签到运行时和 CI 运行时冒烟检查使用。 |
-| `runner.py` | 多账号并发、有限重试、deadline 和结果汇总。 |
+| `docker-compose.yml` | Docker Compose 部署配置，挂载 `./data` 到容器 `/data` 并运行一次性签到任务。 |
+| `src/swu_checkin/__init__.py` | 包说明和 `__version__`；刻意不在顶层导入子模块，保持 `--help` 与 `--check-config` 轻量。 |
+| `src/swu_checkin/__main__.py` | `python -m swu_checkin` 入口，与 `swu-checkin` 控制台脚本等价。 |
+| `src/swu_checkin/cli.py` | 主程序入口，负责 CLI、配置检查、运行锁和推送汇总；仅在实际操作时加载签到服务。 |
+| `src/swu_checkin/config.py` | 账号来源优先级、统一校验、dotenv 加载、账号文件和推送配置读写；同时决定默认配置目录。 |
+| `src/swu_checkin/menu.py` | 数字配置菜单和交互式账号、并发、推送与缓存操作；不加载浏览器运行时。 |
+| `src/swu_checkin/status.py` | CLI、runner 与签到服务共用的状态码和登录失败原因文本。 |
+| `src/swu_checkin/checkin_service.py` | 单账号签到流程、请假状态、任务查询、提交复查和结果状态映射。 |
+| `src/swu_checkin/runner.py` | 多账号并发、有限重试、deadline 和结果汇总。 |
+| `src/swu_checkin/notify.py` | 钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。 |
+| `src/swu_checkin/api/school.py` | 学校 HTTP 会话、网络诊断、请求重试和学校接口数据；不依赖浏览器。 |
+| `src/swu_checkin/auth/flow.py` | 浏览器登录状态机：入口 → CAS → IDM 表单 → 验证码 → 提交 → Portal → Token，并打印阶段标记。 |
+| `src/swu_checkin/auth/browser.py` | Playwright 浏览器会话、登录表单定位、页面恢复和验证码图片抓取。 |
+| `src/swu_checkin/auth/pages.py` | 登录页选择器常量与纯函数判定（表单字段、提示文案、验证码资源）。 |
+| `src/swu_checkin/auth/captcha.py` | 进程内共享的 ddddocr 引擎与串行化分类调用。 |
+| `src/swu_checkin/auth/cookies.py` | CAS 跳转遗留的不透明设备 Cookie 的精确清除。 |
+| `src/swu_checkin/auth/tokens.py` | Token 提取、CAS ticket 交换、身份校验与缓存。 |
+| `src/swu_checkin/auth/urls.py` | 跳转地址与主机名的纯解析函数。 |
+| `src/swu_checkin/auth/debug.py` | 脱敏登录诊断文本（不保存页面内容或截图）。 |
+| `src/swu_checkin/auth/errors.py` | `LoginError` 与 `FailureReason` 失败分类。 |
+| `src/swu_checkin/logging_utils.py` | 日志初始化，CLI 与性能测量脚本共用。 |
+| `src/swu_checkin/cache.py` | Token 缓存的原子读写和进程内并发保护。 |
+| `src/swu_checkin/atomic_io.py` | 私有配置文件的原子写入：临时文件先降权，再 flush、fsync 和 replace。 |
 | `scripts/smoke_runtime.py` | 独立运行时冒烟检查：启动本地页面和无 channel 的 headless Chromium，并用合成无敏感图片验证 ddddocr；不访问学校网络或执行签到。 |
 | `scripts/profile_login.py` | 交互式只读登录和 Token 缓存性能测量；通过标准输入接收凭据，仅输出脱敏的阶段耗时和进程资源摘要，不执行签到或推送。 |
 | `docs/performance.md` | 性能测量命令、采样口径、凭据安全和当前环境限制说明。 |
 | `docs/login-troubleshooting.md` | 统一认证链路的已知失败特征、设备 Cookie 规则、可调开关与登录失败原因对照。 |
+| `docs/branch-protection.md` | `main` 分支保护（Ruleset）的建议规则、应用命令和验证方式。 |
+| `tests/__init__.py` | 测试包引导：把 `src` 加入 `sys.path`，让未安装的检出目录也能运行同一份代码。 |
+| `tests/fixtures/login/` | 脱敏登录页、跳转地址、`exchange-token` 响应、`localStorage` 与 Cookie 样本，用于回归选择器与分类逻辑。 |
+| `tests/test_login_fixtures.py` | 用脱敏样本驱动登录链解析与分类的回归测试，不访问网络。 |
 | `tests/test_check_in.py` | 不访问网络的签到、配置和重试边界测试。 |
 | `tests/test_config.py` | 账号优先级、dotenv 加载和配置错误测试。 |
 | `tests/test_menu.py` | 不访问网络的菜单文件操作测试。 |
-| `tests/test_login_api.py` | 不访问网络的登录、Token 缓存和 API 请求边界测试。 |
+| `tests/test_login_flow.py` | 登录状态机（入口、跳转恢复、OAuth 补跳与缓存回退）的离线回归测试。 |
+| `tests/test_auth_browser.py` | 浏览器层（UA、定位器、登录表单与错误提示）的离线回归测试。 |
+| `tests/test_auth_cookies.py` | CAS 跳转遗留设备 Cookie 精确清除的离线回归测试。 |
+| `tests/test_auth_tokens.py` | Token 提取、CAS ticket 交换与缓存边界的离线回归测试。 |
+| `tests/test_auth_errors.py` | 登录失败分类与可重试 HTTP 错误的离线回归测试。 |
+| `tests/test_auth_urls.py` | 登录跳转地址解析的离线回归测试。 |
+| `tests/test_school_api.py` | 学校接口传输层（代理、重试、身份缓存）的离线回归测试。 |
+| `tests/test_cache.py` | Token 缓存持久化（权限、原子写与 JSON 结构）的离线回归测试。 |
 | `tests/test_notify.py` | 不访问网络的推送渠道、Telegram 分段和重试边界测试。 |
 | `users.json.example` | 多账号配置格式示例，不包含真实凭据。 |

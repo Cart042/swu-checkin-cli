@@ -1,7 +1,7 @@
 """Interactive configuration menu.
 
 The menu imports the check-in runtime only when a user chooses an action that
-needs it.  Account and dotenv operations come from :mod:`config`, so opening
+needs it.  Account and dotenv operations come from :mod:`swu_checkin.config`, so opening
 the menu does not require Playwright, OCR, or requests to be importable.
 """
 
@@ -12,9 +12,9 @@ import os
 import subprocess
 import sys
 import time
-from typing import Callable
+from collections.abc import Callable
 
-import config
+from . import config
 
 
 def prompt_non_empty(label: str) -> str:
@@ -148,17 +148,13 @@ def menu_update_password(
 
 def menu_set_workers(config_dir=None) -> None:
     spec = config.RUNTIME_PARAMETER_BY_KEY["max_workers"]
-    raw = prompt_non_empty(
-        f"请输入最大并发线程数（{spec.minimum}-{spec.maximum}）："
-    )
+    raw = prompt_non_empty(f"请输入最大并发线程数（{spec.minimum}-{spec.maximum}）：")
     try:
         value = int(raw, 10)
     except (TypeError, ValueError):
         value = None
     if value is None or not spec.minimum <= value <= spec.maximum:
-        print(
-            f"并发线程数必须是 {spec.minimum}-{spec.maximum} 之间的整数。"
-        )
+        print(f"并发线程数必须是 {spec.minimum}-{spec.maximum} 之间的整数。")
         return
     config.set_env_value(spec.env_name, raw, config_dir=config_dir)
     print(f"已写入 .env：{spec.env_name}={raw}")
@@ -267,15 +263,33 @@ def menu_clear_token_cache(config_dir=None) -> None:
 
 def menu_test_push(config_dir=None) -> None:
     try:
-        from notify import send_push
+        from .notify import send_push
     except Exception as exc:
         print(f"无法加载推送模块：{exc}")
         return
     title = "SWU 自动打卡测试通知"
-    content = f"这是一条测试推送。\n配置目录：{config.get_config_dir(config_dir)}\n发送时间：{time.strftime('%Y-%m-%d %H:%M:%S')}"
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    content = f"这是一条测试推送。\n配置目录：{config.get_config_dir(config_dir)}\n发送时间：{timestamp}"
     print("正在发送测试推送...")
     send_push(title, content)
     print("测试推送已触发，请检查对应平台是否收到消息。")
+
+
+def _checkin_command(script_path: str | None) -> list[str]:
+    """Return the command that runs one check-in in a child process.
+
+    The CLI passes its own path, which is the exact entry point that is being
+    used right now.  Standalone menu callers fall back to the ``check_in.py``
+    compatibility entry next to the project root, or to ``python -m
+    swu_checkin`` for an installed package.
+    """
+
+    if script_path:
+        return [sys.executable, os.path.abspath(script_path)]
+    compatibility_entry = os.path.join(config.BASE_DIR, "check_in.py")
+    if os.path.exists(compatibility_entry):
+        return [sys.executable, compatibility_entry]
+    return [sys.executable, "-m", "swu_checkin"]
 
 
 def menu_run_checkin_once(config_dir=None, script_path=None) -> None:
@@ -285,9 +299,8 @@ def menu_run_checkin_once(config_dir=None, script_path=None) -> None:
     directory = config.get_config_dir(config_dir)
     env = os.environ.copy()
     env["SWU_CONFIG_DIR"] = directory
-    script = os.path.abspath(script_path or os.path.join(os.path.dirname(__file__), "check_in.py"))
     print("开始执行打卡，完成前请不要关闭终端...")
-    result = subprocess.run([sys.executable, script], env=env)
+    result = subprocess.run(_checkin_command(script_path), env=env)
     print(f"打卡进程已结束，退出码：{result.returncode}")
 
 
@@ -302,7 +315,7 @@ def run_menu(
 
     directory = config.get_config_dir(config_dir)
     if config_check is None:
-        from check_in import run_config_check
+        from .cli import run_config_check
 
         config_check = run_config_check
 

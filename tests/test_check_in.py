@@ -7,21 +7,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import check_in
-import checkin_service
-import config
-import menu
-import school_api
 from dotenv import dotenv_values
+
+from swu_checkin import checkin_service, cli as check_in, config, menu
+from swu_checkin.api import school as school_api
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class CheckInOfflineTests(unittest.TestCase):
     def test_school_session_is_created_by_direct_session_factory(self):
         session = mock.Mock()
-        with mock.patch.object(checkin_service, "create_school_session", return_value=session) as factory, \
-             mock.patch.object(checkin_service, "get_token", return_value="token"), \
-             mock.patch.object(checkin_service, "vacation_enable", return_value=False), \
-             mock.patch.object(checkin_service, "get_transition_today", return_value=None):
+        with (
+            mock.patch.object(checkin_service, "create_school_session", return_value=session) as factory,
+            mock.patch.object(checkin_service, "get_token", return_value="token"),
+            mock.patch.object(checkin_service, "vacation_enable", return_value=False),
+            mock.patch.object(checkin_service, "get_transition_today", return_value=None),
+        ):
             self.assertEqual(checkin_service.check_in("alice", "password"), 0)
         factory.assert_called_once_with()
         session.close.assert_called_once_with()
@@ -48,10 +50,11 @@ class CheckInOfflineTests(unittest.TestCase):
             )
 
     def test_telegram_menu_sets_and_clears_both_values(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
-            os.environ, {}, clear=True
-        ), mock.patch.object(menu, "prompt_password", return_value="bot-token"), mock.patch(
-            "builtins.input", side_effect=["1", "chat-id"]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(menu, "prompt_password", return_value="bot-token"),
+            mock.patch("builtins.input", side_effect=["1", "chat-id"]),
         ):
             menu.menu_set_telegram(directory)
             self.assertEqual(os.environ["PUSH_TELEGRAM_BOT_TOKEN"], "bot-token")
@@ -70,8 +73,10 @@ class CheckInOfflineTests(unittest.TestCase):
 
     def test_dependency_check_uses_metadata_without_importing_module(self):
         sentinel = object()
-        with mock.patch.object(check_in.importlib.util, "find_spec", return_value=sentinel) as find_spec, \
-             mock.patch("builtins.__import__", side_effect=AssertionError("unexpected import")):
+        with (
+            mock.patch.object(check_in.importlib.util, "find_spec", return_value=sentinel) as find_spec,
+            mock.patch("builtins.__import__", side_effect=AssertionError("unexpected import")),
+        ):
             self.assertEqual(check_in.check_dependency("ddddocr"), (True, None))
         find_spec.assert_called_once_with("ddddocr")
 
@@ -93,19 +98,22 @@ class CheckInOfflineTests(unittest.TestCase):
         probe.assert_called_once_with(timeout=5)
 
     def test_config_check_displays_effective_runtime_values(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
-            os.environ,
-            {
-                "SWU_MAX_WORKERS": "2",
-                "SWU_MAX_ROUNDS": "4",
-                "SWU_RETRY_INTERVAL_SECONDS": "7",
-                "SWU_RUN_DEADLINE_SECONDS": "11",
-                "SWU_PUSH_DEADLINE_SECONDS": "13",
-            },
-            clear=True,
-        ), mock.patch.object(check_in, "check_dependency", return_value=(True, None)), mock.patch(
-            "builtins.print"
-        ) as printer:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SWU_MAX_WORKERS": "2",
+                    "SWU_MAX_ROUNDS": "4",
+                    "SWU_RETRY_INTERVAL_SECONDS": "7",
+                    "SWU_RUN_DEADLINE_SECONDS": "11",
+                    "SWU_PUSH_DEADLINE_SECONDS": "13",
+                },
+                clear=True,
+            ),
+            mock.patch.object(check_in, "check_dependency", return_value=(True, None)),
+            mock.patch("builtins.print") as printer,
+        ):
             self.assertEqual(
                 check_in.run_config_check("alice", "password", config_dir=directory),
                 0,
@@ -129,6 +137,7 @@ class CheckInOfflineTests(unittest.TestCase):
                 "SWU_RUN_DEADLINE_SECONDS": "11",
             },
         ):
+
             def fake_checkin(username, password, **kwargs):
                 calls.append(kwargs["deadline"])
                 return 0
@@ -146,8 +155,8 @@ class CheckInOfflineTests(unittest.TestCase):
 
     def test_help_does_not_require_browser_dependencies(self):
         result = subprocess.run(
-            [sys.executable, "-S", "check_in.py", "--help"],
-            cwd=Path(check_in.__file__).parent,
+            [sys.executable, "-S", str(REPO_ROOT / "check_in.py"), "--help"],
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
         )
@@ -155,10 +164,12 @@ class CheckInOfflineTests(unittest.TestCase):
         self.assertIn("--check-network", result.stdout)
 
     def test_validate_accounts_deduplicates_and_preserves_password_spaces(self):
-        accounts = config.validate_accounts([
-            {"username": "  alice ", "password": "  keep spaces  "},
-            {"username": "alice", "password": "different"},
-        ])
+        accounts = config.validate_accounts(
+            [
+                {"username": "  alice ", "password": "  keep spaces  "},
+                {"username": "alice", "password": "different"},
+            ]
+        )
         self.assertEqual(accounts, [{"username": "alice", "password": "  keep spaces  "}])
 
     def test_unknown_leave_response_is_business_failure(self):
@@ -172,9 +183,11 @@ class CheckInOfflineTests(unittest.TestCase):
         transition = {"formId": "form", "id": "record", "qdzt": "待签到"}
         response = mock.Mock()
         response.json.return_value = {"code": 200, "data": False}
-        with mock.patch.object(checkin_service, "_checkin_payload", return_value=({}, "form")), \
-             mock.patch.object(checkin_service, "request_with_retry", return_value=response), \
-             mock.patch.object(checkin_service, "get_transition_today", return_value=transition):
+        with (
+            mock.patch.object(checkin_service, "_checkin_payload", return_value=({}, "form")),
+            mock.patch.object(checkin_service, "request_with_retry", return_value=response),
+            mock.patch.object(checkin_service, "get_transition_today", return_value=transition),
+        ):
             with self.assertRaises(checkin_service.SwuBusinessError):
                 checkin_service.checkin_post("token", 1, object(), transition)
 
@@ -183,9 +196,11 @@ class CheckInOfflineTests(unittest.TestCase):
         response = mock.Mock()
         response.json.return_value = {"code": 200, "data": None}
         wrong_record = {"formId": "other", "id": "other-record", "qdzt": "已签到"}
-        with mock.patch.object(checkin_service, "_checkin_payload", return_value=({}, "form")), \
-             mock.patch.object(checkin_service, "request_with_retry", return_value=response), \
-             mock.patch.object(checkin_service, "get_transition_today", return_value=wrong_record):
+        with (
+            mock.patch.object(checkin_service, "_checkin_payload", return_value=({}, "form")),
+            mock.patch.object(checkin_service, "request_with_retry", return_value=response),
+            mock.patch.object(checkin_service, "get_transition_today", return_value=wrong_record),
+        ):
             with self.assertRaises(checkin_service.SwuBusinessError):
                 checkin_service.checkin_post("token", 1, object(), transition)
 
@@ -206,25 +221,34 @@ class CheckInOfflineTests(unittest.TestCase):
             calls.append((args, kwargs))
             raise TimeoutError("write timeout")
 
-        with mock.patch.object(checkin_service, "requests", fake_requests), \
-             mock.patch.object(checkin_service, "_checkin_payload", return_value=({}, "form")), \
-             mock.patch.object(checkin_service, "request_with_retry", side_effect=request), \
-             mock.patch.object(checkin_service, "get_transition_today", return_value={"formId": "form", "id": "record", "qdzt": "已签到"}):
+        with (
+            mock.patch.object(checkin_service, "requests", fake_requests),
+            mock.patch.object(checkin_service, "_checkin_payload", return_value=({}, "form")),
+            mock.patch.object(checkin_service, "request_with_retry", side_effect=request),
+            mock.patch.object(
+                checkin_service,
+                "get_transition_today",
+                return_value={"formId": "form", "id": "record", "qdzt": "已签到"},
+            ),
+        ):
             self.assertEqual(checkin_service.checkin_post("token", 1, object(), transition), 1)
         self.assertEqual(len(calls), 1)
 
     def test_runner_retries_transient_failure_and_returns_zero_when_recovered(self):
         calls = []
-        original = {key: os.environ.get(key) for key in (
-            "SWU_MAX_WORKERS", "SWU_MAX_ROUNDS", "SWU_RETRY_INTERVAL_SECONDS", "SWU_RUN_DEADLINE_SECONDS"
-        )}
+        original = {
+            key: os.environ.get(key)
+            for key in ("SWU_MAX_WORKERS", "SWU_MAX_ROUNDS", "SWU_RETRY_INTERVAL_SECONDS", "SWU_RUN_DEADLINE_SECONDS")
+        }
         try:
-            os.environ.update({
-                "SWU_MAX_WORKERS": "2",
-                "SWU_MAX_ROUNDS": "2",
-                "SWU_RETRY_INTERVAL_SECONDS": "1",
-                "SWU_RUN_DEADLINE_SECONDS": "30",
-            })
+            os.environ.update(
+                {
+                    "SWU_MAX_WORKERS": "2",
+                    "SWU_MAX_ROUNDS": "2",
+                    "SWU_RETRY_INTERVAL_SECONDS": "1",
+                    "SWU_RUN_DEADLINE_SECONDS": "30",
+                }
+            )
 
             def fake_checkin(username, password, **kwargs):
                 calls.append(username)
@@ -237,7 +261,7 @@ class CheckInOfflineTests(unittest.TestCase):
             )
             self.assertEqual(exit_code, 0)
             self.assertIn("成功: 1 个，失败: 0 个", summary)
-            self.assertEqual(results["alice"][1], True)
+            self.assertTrue(results["alice"].ok)
             self.assertEqual(len(calls), 2)
         finally:
             for key, value in original.items():
@@ -248,11 +272,15 @@ class CheckInOfflineTests(unittest.TestCase):
 
     def test_runner_stops_retry_for_bad_password(self):
         calls = []
-        with mock.patch.dict(os.environ, {
-            "SWU_MAX_ROUNDS": "3",
-            "SWU_RETRY_INTERVAL_SECONDS": "1",
-            "SWU_RUN_DEADLINE_SECONDS": "30",
-        }):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SWU_MAX_ROUNDS": "3",
+                "SWU_RETRY_INTERVAL_SECONDS": "1",
+                "SWU_RUN_DEADLINE_SECONDS": "30",
+            },
+        ):
+
             def fake_checkin(username, password, **kwargs):
                 calls.append(username)
                 return 3
@@ -268,12 +296,16 @@ class CheckInOfflineTests(unittest.TestCase):
 
     def test_runner_only_retries_transient_accounts(self):
         calls = []
-        with mock.patch.dict(os.environ, {
-            "SWU_MAX_WORKERS": "2",
-            "SWU_MAX_ROUNDS": "2",
-            "SWU_RETRY_INTERVAL_SECONDS": "1",
-            "SWU_RUN_DEADLINE_SECONDS": "30",
-        }):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SWU_MAX_WORKERS": "2",
+                "SWU_MAX_ROUNDS": "2",
+                "SWU_RETRY_INTERVAL_SECONDS": "1",
+                "SWU_RUN_DEADLINE_SECONDS": "30",
+            },
+        ):
+
             def fake_checkin(username, password, **kwargs):
                 calls.append(username)
                 return 10 if username == "temporary" and calls.count(username) == 1 else 0
@@ -290,7 +322,7 @@ class CheckInOfflineTests(unittest.TestCase):
         self.assertEqual(calls.count("temporary"), 2)
         self.assertEqual(calls.count("stable"), 1)
         self.assertIn("失败: 0 个", summary)
-        self.assertTrue(results["temporary"][1])
+        self.assertTrue(results["temporary"].ok)
 
     def test_runner_deadline_produces_nonzero_summary(self):
         ticks = [0]
@@ -299,10 +331,13 @@ class CheckInOfflineTests(unittest.TestCase):
             ticks[0] += 1
             return ticks[0]
 
-        with mock.patch.dict(os.environ, {
-            "SWU_MAX_ROUNDS": "3",
-            "SWU_RUN_DEADLINE_SECONDS": "1",
-        }):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SWU_MAX_ROUNDS": "3",
+                "SWU_RUN_DEADLINE_SECONDS": "1",
+            },
+        ):
             summary, exit_code, results = check_in.run_accounts(
                 [{"username": "late", "password": "pw"}],
                 checkin_func=lambda *args, **kwargs: 0,
@@ -310,7 +345,7 @@ class CheckInOfflineTests(unittest.TestCase):
                 clock=clock,
             )
         self.assertEqual(exit_code, 1)
-        self.assertFalse(results["late"][1])
+        self.assertFalse(results["late"].ok)
         self.assertIn("deadline", summary)
 
     def test_atomic_write_uses_private_mode(self):

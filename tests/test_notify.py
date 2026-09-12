@@ -3,7 +3,7 @@ import os
 import unittest
 from unittest import mock
 
-import notify
+from swu_checkin import notify
 
 
 class FakeResponse:
@@ -99,9 +99,10 @@ class NotifyOfflineTests(unittest.TestCase):
             self.assertEqual(len(session.calls), 1)
 
     def test_incomplete_telegram_configuration_warns_without_request(self):
-        with mock.patch.object(notify.requests, "Session") as session_factory, self.assertLogs(
-            notify.logger, level=logging.WARNING
-        ) as logs:
+        with (
+            mock.patch.object(notify.requests, "Session") as session_factory,
+            self.assertLogs(notify.logger, level=logging.WARNING) as logs,
+        ):
             with mock.patch.dict(os.environ, {"PUSH_TELEGRAM_BOT_TOKEN": "token", "PUSH_TELEGRAM_CHAT_ID": ""}):
                 self.assertFalse(notify.send_push("title", "body"))
 
@@ -133,10 +134,12 @@ class NotifyOfflineTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
 
     def test_telegram_failure_does_not_block_other_channels(self):
-        session = FakeSession([
-            FakeResponse(200, {"errcode": 0}),
-            FakeResponse(200, {"ok": False, "error_code": 400}),
-        ])
+        session = FakeSession(
+            [
+                FakeResponse(200, {"errcode": 0}),
+                FakeResponse(200, {"ok": False, "error_code": 400}),
+            ]
+        )
         with mock.patch.dict(
             os.environ,
             {
@@ -152,14 +155,16 @@ class NotifyOfflineTests(unittest.TestCase):
         self.assertIn("Telegram推送失败", "\n".join(logs.output))
 
     def test_send_push_uses_shared_channel_registration_for_all_channels(self):
-        session = FakeSession([
-            FakeResponse(200, {"errcode": 0}),
-            FakeResponse(200, {"errcode": 0}),
-            FakeResponse(200),
-            FakeResponse(200, {"code": 0}),
-            FakeResponse(200, {"code": 0}),
-            FakeResponse(200, {"ok": True}),
-        ])
+        session = FakeSession(
+            [
+                FakeResponse(200, {"errcode": 0}),
+                FakeResponse(200, {"errcode": 0}),
+                FakeResponse(200),
+                FakeResponse(200, {"code": 0}),
+                FakeResponse(200, {"code": 0}),
+                FakeResponse(200, {"ok": True}),
+            ]
+        )
         with mock.patch.dict(
             os.environ,
             {
@@ -184,12 +189,15 @@ class NotifyOfflineTests(unittest.TestCase):
 
     def test_send_push_closes_shared_session_and_returns_status(self):
         session = FakeSession([FakeResponse(200, {"ok": True})])
-        with mock.patch.object(notify.requests, "Session", return_value=session) as session_factory, mock.patch.dict(
-            os.environ,
-            {
-                "PUSH_TELEGRAM_BOT_TOKEN": "token",
-                "PUSH_TELEGRAM_CHAT_ID": "-100123",
-            },
+        with (
+            mock.patch.object(notify.requests, "Session", return_value=session) as session_factory,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "PUSH_TELEGRAM_BOT_TOKEN": "token",
+                    "PUSH_TELEGRAM_CHAT_ID": "-100123",
+                },
+            ),
         ):
             self.assertTrue(notify.send_push("title", "body"))
 
@@ -205,10 +213,12 @@ class NotifyOfflineTests(unittest.TestCase):
                 clock.now += 6
                 return response
 
-        session = SlowSession([
-            FakeResponse(200, {"errcode": 0}),
-            FakeResponse(200, {"errcode": 0}),
-        ])
+        session = SlowSession(
+            [
+                FakeResponse(200, {"errcode": 0}),
+                FakeResponse(200, {"errcode": 0}),
+            ]
+        )
         with mock.patch.dict(
             os.environ,
             {
@@ -231,9 +241,12 @@ class NotifyOfflineTests(unittest.TestCase):
 
     def test_invalid_push_deadline_uses_bounded_default(self):
         for raw in ("0", "-1", "3601", "not-a-number"):
-            with self.subTest(raw=raw), mock.patch.dict(
-                os.environ,
-                {"SWU_PUSH_DEADLINE_SECONDS": raw},
+            with (
+                self.subTest(raw=raw),
+                mock.patch.dict(
+                    os.environ,
+                    {"SWU_PUSH_DEADLINE_SECONDS": raw},
+                ),
             ):
                 self.assertEqual(
                     notify._configured_push_deadline_seconds(),
@@ -242,13 +255,15 @@ class NotifyOfflineTests(unittest.TestCase):
 
     def test_telegram_retry_wait_is_skipped_when_budget_is_insufficient(self):
         clock = FakeClock()
-        sleeps = []
-        session = FakeSession([
-            FakeResponse(
-                429,
-                {"ok": False, "error_code": 429, "parameters": {"retry_after": 4}},
-            ),
-        ])
+        sleeps: list[float] = []
+        session = FakeSession(
+            [
+                FakeResponse(
+                    429,
+                    {"ok": False, "error_code": 429, "parameters": {"retry_after": 4}},
+                ),
+            ]
+        )
         with mock.patch.dict(
             os.environ,
             {
@@ -326,6 +341,7 @@ class NotifyOfflineTests(unittest.TestCase):
         http_logger.setLevel(logging.DEBUG)
         http_logger.addHandler(handler)
         try:
+
             class LoggingSession(FakeSession):
                 def post(self, url, **kwargs):
                     http_logger.debug("POST %s body=%s", url, kwargs.get("json"))
@@ -356,6 +372,7 @@ class NotifyOfflineTests(unittest.TestCase):
         http_logger.setLevel(logging.DEBUG)
         http_logger.addHandler(handler)
         try:
+
             class FailingSession(FakeSession):
                 def post(self, url, **kwargs):
                     http_logger.debug("POST %s body=%s", url, kwargs.get("json"))

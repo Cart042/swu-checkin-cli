@@ -1,0 +1,14 @@
+{
+  "_comment": "登录链各阶段的跳转地址。账号、票据均为占位值，不对应真实会话。",
+  "cas_entry": "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Ffighter-middle%2Fapi%2Fintegrate%2Fuaap%2Fcas%2Fresolve-cas-return%3Fnext%3Dhttps%253A%252F%252Fof.swu.edu.cn%252F%2523%252FcasLogin%253Ffrom%253D%25252FappCenter",
+  "idm_form": "https://idm.swu.edu.cn/am/UI/Login?realm=example&goto=example-not-real",
+  "oauth_hop_insecure": "http://idm.swu.edu.cn/am/oauth2/authorize?service=initService&goto=example-not-real",
+  "oauth_hop_secure": "https://idm.swu.edu.cn/am/oauth2/authorize?service=initService&goto=example-not-real",
+  "portal_callback": "https://of.swu.edu.cn/gateway/fighter-middle/api/integrate/uaap/cas/resolve-cas-return?ticket=ST-0000-example-not-real&next=https%3A%2F%2Fof.swu.edu.cn%2F%23%2FcasLogin",
+  "portal_callback_hash": "https://of.swu.edu.cn/#/casLogin?ticket=ST-0000-example-not-real",
+  "expected": {
+    "ticket": "ST-0000-example-not-real",
+    "cas_entry_host": "of.swu.edu.cn",
+    "idm_form_host": "idm.swu.edu.cn"
+  }
+}

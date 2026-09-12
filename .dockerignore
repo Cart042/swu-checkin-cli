@@ -1,5 +1,8 @@
 __pycache__/
 *.py[cod]
+.ruff_cache/
+.mypy_cache/
+.venv/
 .env
 users.json
 .token_cache.json

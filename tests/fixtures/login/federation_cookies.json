@@ -1,0 +1,13 @@
+{
+  "_comment": "CAS 跳转后浏览器 Cookie 列表；不透明设备 Cookie 的名称与真实格式一致（13 位 base62），值全部是占位值。",
+  "login_host": "idm.swu.edu.cn",
+  "cookies": [
+    { "name": "0000deviceA00", "value": "example-not-real-a", "domain": "idm.swu.edu.cn", "path": "/" },
+    { "name": "0000deviceB00", "value": "example-not-real-b", "domain": "idm.swu.edu.cn", "path": "/" },
+    { "name": "SESSION", "value": "example-not-real-session", "domain": "idm.swu.edu.cn", "path": "/am" },
+    { "name": "iPlanetDirectoryPro", "value": "example-not-real-sso", "domain": "idm.swu.edu.cn", "path": "/" },
+    { "name": "0000deviceA00", "value": "example-not-real-c", "domain": "uaaap.swu.edu.cn", "path": "/" }
+  ],
+  "expected_dropped": ["0000deviceA00", "0000deviceB00"],
+  "expected_kept_on_login_host": ["SESSION", "iPlanetDirectoryPro"]
+}

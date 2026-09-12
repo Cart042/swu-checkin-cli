@@ -1,7 +1,7 @@
 """Small, private Token cache used by the SWU login facade.
 
 The cache intentionally owns only persistence concerns.  Token validation stays
-in :mod:`school_api`: callers must validate a candidate before calling
+in :mod:`swu_checkin.api.school`: callers must validate a candidate before calling
 ``save_cached_token``.  File writes are atomic and use restrictive permissions
 because the cache contains bearer credentials.
 """
@@ -10,8 +10,7 @@ import json
 import os
 import threading
 
-from atomic_io import atomic_write_text
-
+from .atomic_io import atomic_write_text
 
 _token_cache_lock = threading.Lock()
 
@@ -20,7 +19,7 @@ def load_cached_token(username, cache_path):
     """Return the cached token for *username*, or ``None`` when unavailable."""
     with _token_cache_lock:
         try:
-            with open(cache_path, "r", encoding="utf-8") as handle:
+            with open(cache_path, encoding="utf-8") as handle:
                 cache = json.load(handle)
             if not isinstance(cache, dict):
                 return None
@@ -39,7 +38,7 @@ def save_cached_token(username, token, cache_path):
 
         cache = {}
         try:
-            with open(absolute_path, "r", encoding="utf-8") as handle:
+            with open(absolute_path, encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if isinstance(loaded, dict):
                 cache = loaded

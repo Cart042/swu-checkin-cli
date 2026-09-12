@@ -12,13 +12,34 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
-from atomic_io import atomic_write_text
+from .atomic_io import atomic_write_text
+from .models import Account
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def _default_base_dir() -> str:
+    """Return the directory that holds ``users.json`` and ``.env``.
+
+    The historical flat layout resolved this to the repository root because
+    every module lived there.  The package now lives in ``src/swu_checkin``,
+    so the same directory is derived from the ``src`` layout instead.  Wheel
+    installs land in ``site-packages``, which is not writable user space, and
+    fall back to the working directory; deployments should set
+    ``SWU_CONFIG_DIR`` explicitly (the Docker image uses ``/data``).
+    """
+
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(package_dir)
+    if os.path.basename(parent_dir) == "src":
+        return os.path.dirname(parent_dir)
+    if os.path.basename(parent_dir) in {"site-packages", "dist-packages"}:
+        return os.getcwd()
+    return package_dir
+
+
+BASE_DIR = _default_base_dir()
 CONFIG_DIR = os.path.abspath(os.getenv("SWU_CONFIG_DIR", BASE_DIR))
 
 logger = logging.getLogger("swu.config")
@@ -144,7 +165,7 @@ PUSH_CHANNELS = (
 class AccountResolution:
     """Result of resolving one account source in priority order."""
 
-    accounts: list[dict[str, str]]
+    accounts: list[Account]
     source: str | None = None
     errors: tuple[str, ...] = ()
 
@@ -263,7 +284,7 @@ def _atomic_write_text(path: str, content: str, mode: int = 0o600) -> None:
     atomic_write_text(path, content, mode=mode, prefix=".swu-write-")
 
 
-def validate_accounts(accounts) -> list[dict[str, str]]:
+def validate_accounts(accounts) -> list[Account]:
     """Validate, normalize, and de-duplicate an account list.
 
     Usernames are stripped for matching; passwords are opaque and keep their
@@ -273,7 +294,7 @@ def validate_accounts(accounts) -> list[dict[str, str]]:
     if not isinstance(accounts, list):
         raise ValueError("账号配置必须是 JSON 数组格式（List）")
 
-    validated: list[dict[str, str]] = []
+    validated: list[Account] = []
     seen_usernames: set[str] = set()
     for idx, account in enumerate(accounts, 1):
         if not isinstance(account, dict):
@@ -303,11 +324,11 @@ def validate_accounts(accounts) -> list[dict[str, str]]:
     return validated
 
 
-def load_users_file(config_dir: str | os.PathLike[str] | None = None) -> list[dict[str, str]]:
+def load_users_file(config_dir: str | os.PathLike[str] | None = None) -> list[Account]:
     path = users_config_path(config_dir)
     if not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return validate_accounts(json.load(handle))
 
 
@@ -343,7 +364,7 @@ def set_env_value(
     path = env_config_path(config_dir)
     lines: list[str] = []
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
 
     encoded_value = _dotenv_quote(value)
@@ -371,14 +392,15 @@ def unset_env_value(*keys: str, config_dir: str | os.PathLike[str] | None = None
     path = env_config_path(config_dir)
     if not os.path.exists(path):
         return
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         lines = handle.read().splitlines()
     key_set = set(keys)
-    updated = [
-        line
-        for line in lines
-        if not (_ENV_ASSIGNMENT_RE.match(line) and _ENV_ASSIGNMENT_RE.match(line).group(1) in key_set)
-    ]
+
+    def _key_of(line: str) -> str | None:
+        match = _ENV_ASSIGNMENT_RE.match(line)
+        return match.group(1) if match else None
+
+    updated = [line for line in lines if _key_of(line) not in key_set]
     _atomic_write_text(path, "\n".join(updated).rstrip("\n") + "\n")
 
 
@@ -399,9 +421,7 @@ def configured_push_channels(environ: Mapping[str, str] | None = None) -> list[s
 
     env = os.environ if environ is None else environ
     return [
-        channel.name
-        for channel in PUSH_CHANNELS
-        if all(_env_value_present(env, name) for name in channel.required_env)
+        channel.name for channel in PUSH_CHANNELS if all(_env_value_present(env, name) for name in channel.required_env)
     ]
 
 
@@ -414,9 +434,7 @@ def push_configuration_errors(environ: Mapping[str, str] | None = None) -> list[
         present = [name for name in channel.required_env if _env_value_present(env, name)]
         if present and len(present) < len(channel.required_env):
             missing = [name for name in channel.required_env if name not in present]
-            errors.append(
-                f"{channel.name} 推送缺少 {', '.join(missing)}。"
-            )
+            errors.append(f"{channel.name} 推送缺少 {', '.join(missing)}。")
     return errors
 
 

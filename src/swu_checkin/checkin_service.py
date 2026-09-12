@@ -11,22 +11,23 @@ import time
 
 import requests
 
-from get_info import get_token
-from school_api import (
+from .api.school import (
     DeadlineExceeded,
     SwuBusinessError,
     SwuRequestError,
     TokenInvalidError,
-    check_school_connectivity,
+    check_school_connectivity,  # noqa: F401 - 运行时边界的兼容导出
     create_school_session,
     get_dormitory,
     get_student_id,
     get_transition_today,
     request_with_retry,
 )
-from status import LOGIN_REASON_STATUS, STATUS_MESSAGES
+from .auth.flow import get_token
+from .status import LOGIN_REASON_STATUS, STATUS_MESSAGES, CheckinStatus
 
 logger = logging.getLogger("swu.check_in")
+
 
 def _api_body(response, endpoint):
     """Decode an API body and turn malformed payloads into business failures."""
@@ -150,46 +151,42 @@ def checkin_post(token, timeout, session, transition_today, deadline=None):
         body = _api_body(response, "签到提交接口")
         code = body.get("code")
         if code is not None and code not in {0, 200, 1100, "0", "200", "1100"}:
-            raise SwuBusinessError(f"签到提交接口返回业务失败：code={code!r}, message={body.get('msg', body.get('message', ''))}")
+            message = body.get("msg", body.get("message", ""))
+            raise SwuBusinessError(f"签到提交接口返回业务失败：code={code!r}, message={message}")
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
         logger.warning("签到写请求结果未知，先查询今日状态，不重复提交：%s", exc)
         try:
             after_timeout = get_transition_today(token, timeout, session=session, deadline=deadline)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as query_exc:
             logger.error("签到写请求超时且复查失败：%s", query_exc)
-            return 4
+            return CheckinStatus.CONNECTION_ERROR
         if _same_checked_in_record(after_timeout, transition_today):
-            return 1
-        return 4
+            return CheckinStatus.SUCCESS
+        return CheckinStatus.CONNECTION_ERROR
 
     # A successful HTTP response is not proof of a successful business action.
     try:
         after_submit = get_transition_today(token, timeout, session=session, deadline=deadline)
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
         logger.error("签到提交后复查失败：%s", exc)
-        return 4
+        return CheckinStatus.CONNECTION_ERROR
     if _same_checked_in_record(after_submit, transition_today):
-        return 1
+        return CheckinStatus.SUCCESS
     raise SwuBusinessError("签到提交接口未在复查中确认已签到")
 
 
 def _same_checked_in_record(candidate, submitted_record):
-    if (
-        not isinstance(candidate, dict)
-        or not isinstance(submitted_record, dict)
-        or candidate.get("qdzt") != "已签到"
-    ):
+    if not isinstance(candidate, dict) or not isinstance(submitted_record, dict) or candidate.get("qdzt") != "已签到":
         return False
-    return (
-        str(candidate.get("id")) == str(submitted_record.get("id"))
-        and str(candidate.get("formId")) == str(submitted_record.get("formId"))
+    return str(candidate.get("id")) == str(submitted_record.get("id")) and str(candidate.get("formId")) == str(
+        submitted_record.get("formId")
     )
 
 
 def check_in(username: str, password: str, timeout: int = 10, force_login: bool = False, deadline=None):
     if requests is None:
         logger.error("requests 依赖未安装")
-        return 10
+        return CheckinStatus.SCHOOL_API_ERROR
     session = create_school_session()
     try:
         try:
@@ -203,45 +200,48 @@ def check_in(username: str, password: str, timeout: int = 10, force_login: bool 
             )
         except Exception as exc:
             reason = getattr(exc, "reason", "unknown")
-            status = LOGIN_REASON_STATUS.get(reason, 11 if isinstance(exc, TokenInvalidError) else 10)
+            status = LOGIN_REASON_STATUS.get(
+                reason,
+                CheckinStatus.TOKEN_INVALID if isinstance(exc, TokenInvalidError) else CheckinStatus.SCHOOL_API_ERROR,
+            )
             logger.error("登录失败（%s）: %s", STATUS_MESSAGES.get(status, "未知原因"), exc)
             return status
 
         try:
             if vacation_enable(token, timeout, session=session, deadline=deadline):
-                return 5
+                return CheckinStatus.ON_LEAVE
             transition_today = get_transition_today(token, timeout, session=session, deadline=deadline)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
             logger.error("学校接口连接失败或超时: %s", exc)
-            return 4
+            return CheckinStatus.CONNECTION_ERROR
         except TokenInvalidError:
-            return 11
+            return CheckinStatus.TOKEN_INVALID
         except (SwuRequestError, SwuBusinessError) as exc:
             logger.error("学校接口失败: %s", exc)
-            return 10
+            return CheckinStatus.SCHOOL_API_ERROR
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             logger.error("学校接口返回结构异常: %s", exc)
-            return 10
+            return CheckinStatus.SCHOOL_API_ERROR
         except Exception as exc:
             logger.error("学校接口请求异常: %s", exc)
-            return 10
+            return CheckinStatus.SCHOOL_API_ERROR
 
         if not transition_today:
-            return 0
+            return CheckinStatus.NO_TASK
         if transition_today.get("qdzt") == "已签到":
-            return 2
+            return CheckinStatus.ALREADY_CHECKED_IN
         try:
             return checkin_post(token, timeout, session=session, transition_today=transition_today, deadline=deadline)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, DeadlineExceeded) as exc:
             logger.error("签到连接失败或超时: %s", exc)
-            return 4
+            return CheckinStatus.CONNECTION_ERROR
         except TokenInvalidError:
-            return 11
+            return CheckinStatus.TOKEN_INVALID
         except (SwuRequestError, SwuBusinessError, KeyError, IndexError, TypeError, ValueError) as exc:
             logger.error("签到业务失败: %s", exc)
-            return 10
+            return CheckinStatus.SCHOOL_API_ERROR
         except Exception as exc:
             logger.error("签到执行异常: %s", exc)
-            return 10
+            return CheckinStatus.SCHOOL_API_ERROR
     finally:
         session.close()

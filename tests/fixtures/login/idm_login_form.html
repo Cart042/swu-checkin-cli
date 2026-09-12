@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>统一身份认证</title>
+  </head>
+  <body>
+    <div class="login-wrap">
+      <div class="tab"><span>用户名密码</span></div>
+      <form id="loginForm" method="post" action="/am/UI/Login">
+        <input type="hidden" name="IDToken0" value="example-not-real" />
+        <input type="hidden" name="goto" value="aHR0cHM6Ly9vZi5zd3UuZWR1LmNu" />
+        <input id="loginName" name="IDToken1" type="text" placeholder="请输入用户名" autocomplete="off" />
+        <input id="password" name="IDToken2" type="password" placeholder="请输入密码" />
+        <input id="validateCode" name="IDToken3" type="text" placeholder="请输入验证码" maxlength="4" />
+        <img id="kaptchaImage" src="/am/validate.code?t=0000" alt="验证码" width="120" height="40" />
+        <img src="/am/unified_button.png" alt="统一认证" />
+        <input id="button" name="IDButton" type="submit" value="登录" />
+      </form>
+    </div>
+  </body>
+</html>

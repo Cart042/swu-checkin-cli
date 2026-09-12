@@ -1,0 +1,120 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swu-checkin"
+version = "1.2.0"
+description = "西南大学自动打卡命令行工具，使用浏览器登录，支持多账号、Docker、GitHub Actions 和多通道推送"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Cart042" }]
+keywords = ["swu", "checkin", "automation", "cli", "playwright"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "requests==2.34.2",
+    "playwright==1.62.0",
+    "ddddocr==1.6.1",
+    "python-dotenv==1.2.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/Cart042/swu-checkin-cli"
+Issues = "https://github.com/Cart042/swu-checkin-cli/issues"
+
+[project.scripts]
+swu-checkin = "swu_checkin.cli:main"
+
+[project.optional-dependencies]
+# 静态检查与格式化工具，供本地开发和 Fast CI 使用。
+dev = [
+    "ruff==0.14.4",
+    "mypy==1.18.2",
+    "types-requests>=2.32.0",
+]
+# 离线单元测试真正需要导入的运行时依赖。
+# Chromium 与 ddddocr 只在 Runtime CI 中安装，普通单元测试不依赖它们。
+test = [
+    "requests==2.34.2",
+    "python-dotenv==1.2.3",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".venv", "data", "debug", "logs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    # 项目与文档以中文为主，全角标点属于正常内容，不是易混淆字符。
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # 既有控制流里 try/except/pass 与嵌套 with 的可读性取舍保持一致。
+    "SIM105",
+    "SIM117",
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = [
+    "check_in",
+    "swu_checkin",
+]
+
+[tool.mypy]
+python_version = "3.11"
+# 运行目标是 Linux（Docker 镜像与 GitHub Actions），固定 platform 让本地 macOS
+# 检查与 CI 结果一致：否则 ``sys.platform != "linux"`` 这类守卫会被判定为常量真，
+# 其后整段函数都会被当成不可达而跳过检查。
+platform = "linux"
+files = [
+    "check_in.py",
+    "src",
+    "scripts",
+    "tests",
+]
+mypy_path = "src"
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+show_error_codes = true
+# 迁移期先不强制每个函数都有注解；新增模块再逐步开启严格模式。
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["ddddocr.*", "playwright.*"]
+ignore_missing_imports = true
+
+# ``msvcrt`` only exists on Windows, so the Windows-only lock helpers cannot be
+# resolved on the Linux/macOS machines that run this check.  The branch itself
+# is never executed there.
+[[tool.mypy.overrides]]
+module = ["swu_checkin.cli"]
+disable_error_code = ["attr-defined"]
+
+# The profile-login tests install ``types.ModuleType`` doubles for the login
+# and school-API modules, so attribute access on them is intentionally dynamic.
+[[tool.mypy.overrides]]
+module = ["tests.test_profile_login", "test_profile_login"]
+disable_error_code = ["attr-defined"]
