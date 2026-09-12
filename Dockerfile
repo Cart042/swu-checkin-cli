@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 # PLAYWRIGHT_BROWSERS_PATH 必须指向共享路径：容器以非 root 用户运行，
