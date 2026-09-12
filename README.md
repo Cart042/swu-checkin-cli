@@ -135,7 +135,9 @@ swu-checkin -m
 
 四个 job 之外还有一个 `CI required checks` gate job，用于把结果汇总成一个稳定的检查名，分支保护只需要锁这一个名字。前三个 job 属于 Fast CI，只安装 `requests` 和 `python-dotenv`，几秒内即可反馈；浏览器和 OCR 初始化更重，因此运行时冒烟检查单独成 job。冒烟检查在 `127.0.0.1` 启动本地页面，用无 channel 的 headless Chromium 打开页面，再初始化 ddddocr 并识别仓库内置的合成验证码图片。所有 PR 检查都不登录学校网站、不执行签到，也不需要真实账号。
 
-`main` 的分支保护（Ruleset）需要在 GitHub 侧应用一次，规则内容与执行命令见 [docs/branch-protection.md](docs/branch-protection.md)。
+仓库还有 `Runtime Smoke` 工作流，每天北京时间 03:00 定时运行同一套 Chromium + ddddocr 冒烟检查，并在完整运行时依赖下启动一次 CLI。它覆盖的是「没有 PR 时依赖或 runner 镜像悄悄漂移」这一类问题，可以手动触发。跑失败不影响 PR，但说明当天需要人工确认运行时依赖。
+
+`main` 的分支保护（Ruleset `protect-main`）已经应用：禁止删除和 force push，合并必须走 PR 并通过 `CI required checks`。规则内容、重新应用和临时删除的命令见 [docs/branch-protection.md](docs/branch-protection.md)。
 
 公开仓库的 PR 工作流只使用 GitHub 托管的 `ubuntu-latest`。不要把 `pull_request` 事件接到自托管 runner：fork 可以修改被检出的代码，而签到凭据和部署主机必须与 PR 构建隔离。需要自托管 runner 时请放在私有运行仓库中，并只允许受信任的定时工作流使用。
 

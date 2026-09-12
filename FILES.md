@@ -11,6 +11,7 @@
 | `.github/workflows/swu-check.yml` | GitHub Actions 定时和手动签到工作流，使用缓存的 Python 依赖和 Chromium headless shell 登录；手动调试开关启用时上传短期保留的脱敏文本 artifact。 |
 | `.github/workflows/pr-ci.yml` | Pull Request 检查，分为 Ruff 检查、mypy 类型检查、Python 3.11/3.12 离线单元测试和运行时冒烟四个 job；公开仓库只在 GitHub 托管 runner 上运行，不访问学校网站。 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签时的发布流程：校验标签与 `pyproject.toml` 版本一致、构建 sdist/wheel、创建 GitHub Release 并推送 GHCR 镜像。 |
+| `.github/workflows/runtime-smoke.yml` | 每天定时（也可手动触发）在完整运行时依赖下跑 Chromium + ddddocr 冒烟检查和 `check_in.py --help`，覆盖依赖与 runner 镜像漂移。 |
 | `.github/dependabot.yml` | 每周检查 Python 依赖、GitHub Actions 和 Docker 基础镜像的更新。 |
 | `.dockerignore` | 排除账号、环境变量、Token 缓存、日志、调试文件、运行锁、Git 元数据和 Python 缓存，避免进入镜像。 |
 | `.env.example` | 环境变量模板，包含账号、多账号、并发、重试、按需调试和推送配置示例。 |

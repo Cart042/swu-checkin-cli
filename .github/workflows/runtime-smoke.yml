@@ -1,0 +1,46 @@
+name: Runtime Smoke
+
+on:
+  schedule:
+    # 每天北京时间 03:00（UTC 19:00）。PR CI 只在有 PR 时验证 Chromium 和
+    # ddddocr；没人提 PR 时，runner 镜像、Playwright 浏览器或 OCR 依赖的漂移
+    # 不会被发现，所以再用一条定时工作流兜底。
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Chromium + ddddocr smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Install Chromium headless shell
+        run: python -m playwright install --with-deps --only-shell chromium
+
+      - name: Run local runtime smoke test
+        run: python scripts/smoke_runtime.py
+
+      # PR CI 的单元测试只装了 requests 和 python-dotenv，这里在完整运行时依赖
+      # 下再启动一次 CLI，覆盖"离线测试通过、装了浏览器依赖后反而起不来"的情况。
+      - name: Check command-line entry point
+        run: python check_in.py --help
