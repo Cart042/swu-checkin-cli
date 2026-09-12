@@ -35,6 +35,148 @@ class FakeSession:
 
 
 class LoginApiOfflineTests(unittest.TestCase):
+    def test_login_user_agent_hides_headless_marker(self):
+        browser = mock.Mock(version="151.0.7922.34")
+        user_agent = get_info._login_user_agent(browser)
+        self.assertNotIn("Headless", user_agent)
+        self.assertIn("Chrome/151.0.0.0", user_agent)
+        # An unknown version must fall back to the browser default instead of
+        # advertising a made-up build.
+        self.assertIsNone(get_info._login_user_agent(mock.Mock(version="")))
+
+    def test_drop_federation_cookies_only_touches_login_host(self):
+        context = mock.Mock()
+        context.cookies.return_value = [
+            {"name": "61zqTsrO93nzO", "value": "a", "domain": "idm.swu.edu.cn", "path": "/"},
+            {"name": "61zqTsrO93nzP", "value": "b", "domain": "idm.swu.edu.cn", "path": "/"},
+            {"name": "SESSION", "value": "c", "domain": "idm.swu.edu.cn", "path": "/am"},
+            {"name": "61zqTsrO93nzO", "value": "d", "domain": "uaaap.swu.edu.cn", "path": "/"},
+            {"name": "iPlanetDirectoryPro", "value": "e", "domain": "idm.swu.edu.cn", "path": "/"},
+        ]
+        get_info._drop_federation_cookies(context, "idm.swu.edu.cn", "offline")
+        context.clear_cookies.assert_called_once()
+        kept = {cookie["name"] for cookie in context.add_cookies.call_args[0][0]}
+        self.assertEqual(kept, {"SESSION", "iPlanetDirectoryPro", "61zqTsrO93nzO"})
+        domains = {
+            cookie["name"]: cookie["domain"]
+            for cookie in context.add_cookies.call_args[0][0]
+            if cookie["name"] == "61zqTsrO93nzO"
+        }
+        self.assertEqual(domains["61zqTsrO93nzO"], "uaaap.swu.edu.cn")
+
+    def test_drop_federation_cookies_ignores_other_hosts(self):
+        context = mock.Mock()
+        context.cookies.return_value = [
+            {"name": "61zqTsrO93nzO", "value": "a", "domain": "uaaap.swu.edu.cn", "path": "/"},
+        ]
+        get_info._drop_federation_cookies(context, "idm.swu.edu.cn", "offline")
+        context.clear_cookies.assert_not_called()
+        context.add_cookies.assert_not_called()
+
+    def test_recovery_replays_redirect_over_https(self):
+        page = mock.Mock()
+        page.url = "https://idm.swu.edu.cn/am/UI/Login"
+        context = mock.Mock()
+        context.cookies.return_value = []
+        with mock.patch.object(get_info, "_drop_federation_cookies") as drop, mock.patch.object(
+            get_info, "_wait_for_login_result", return_value=True
+        ):
+            recovered = get_info._recover_blocked_oauth_hop(
+                page,
+                context,
+                "offline",
+                "https://uaaap.swu.edu.cn/cas/login",
+                "http://idm.swu.edu.cn/am/oauth2/authorize?service=initService",
+                5,
+            )
+        self.assertTrue(recovered)
+        self.assertEqual(
+            page.goto.call_args[0][0],
+            "https://idm.swu.edu.cn/am/oauth2/authorize?service=initService",
+        )
+        drop.assert_called_once()
+
+    def test_real_idm_captcha_survives_resource_filter(self):
+        for url in ("https://idm.swu.edu.cn/am/validate.code", "https://idm.swu.edu.cn/am/validate.code?t=42"):
+            route = mock.Mock()
+            route.request.resource_type = "image"
+            route.request.url = url
+            get_info.route_login_resource(route)
+            route.continue_.assert_called_once()
+            route.abort.assert_not_called()
+        route = mock.Mock()
+        route.request.resource_type = "image"
+        route.request.url = "https://idm.swu.edu.cn/background.png"
+        get_info.route_login_resource(route)
+        route.abort.assert_called_once()
+
+    def test_captcha_uses_rendered_image_without_regenerating_challenge(self):
+        page = mock.Mock()
+        captcha = mock.Mock()
+        captcha.screenshot.return_value = b"rendered-image"
+        result = get_info.get_captcha_image_bytes(page, captcha, 5)
+        self.assertEqual(result, b"rendered-image")
+        page.request.get.assert_not_called()
+        page.wait_for_function.assert_called_once_with(
+            "img => img.complete && img.naturalWidth > 0",
+            arg=captcha.element_handle.return_value,
+            timeout=5000,
+        )
+        captcha.screenshot.assert_called_once_with(timeout=5000)
+
+    def test_unloaded_captcha_is_not_sent_to_ocr(self):
+        page = mock.Mock()
+        page.wait_for_function.side_effect = TimeoutError("image not loaded")
+        captcha = mock.Mock()
+        with self.assertRaises(TimeoutError):
+            get_info.get_captcha_image_bytes(page, captcha, 5)
+        captcha.screenshot.assert_not_called()
+        page.request.get.assert_not_called()
+
+    def test_unified_navigation_http_error_stops_form_retries(self):
+        for status in (400, 503):
+            with self.subTest(status=status):
+                page = mock.MagicMock()
+                button = page.locator.return_value.first
+                button.count.return_value = 1
+                page.expect_navigation.return_value.__enter__.return_value.value = mock.Mock(status=status)
+                login = mock.Mock()
+                login.wait_for.side_effect = TimeoutError("no visible form")
+                with mock.patch.object(get_info, "recover_from_idm_error_page"), mock.patch.object(
+                    get_info, "click_username_password_tab"
+                ), mock.patch.object(get_info, "login_name_locator", return_value=login):
+                    with self.assertRaises(get_info.LoginError) as caught:
+                        get_info.ensure_login_form(page, "offline", 5)
+                self.assertEqual(caught.exception.reason, "page_load")
+                self.assertEqual(str(caught.exception), f"认证页面返回 HTTP {status}")
+                button.click.assert_called_once()
+                login.wait_for.assert_called_once()
+
+    def test_unified_navigation_success_resumes_form_detection(self):
+        page = mock.MagicMock()
+        page.locator.return_value.first.count.return_value = 1
+        page.expect_navigation.return_value.__enter__.return_value.value = mock.Mock(status=200)
+        login = mock.Mock()
+        login.wait_for.side_effect = [TimeoutError("landing page"), None]
+        password = mock.Mock()
+        with mock.patch.object(get_info, "recover_from_idm_error_page"), mock.patch.object(
+            get_info, "click_username_password_tab"
+        ), mock.patch.object(get_info, "login_name_locator", return_value=login), mock.patch.object(
+            get_info, "password_locator", return_value=password
+        ):
+            get_info.ensure_login_form(page, "offline", 5)
+        self.assertEqual(login.wait_for.call_count, 2)
+        password.wait_for.assert_called_once()
+        page.expect_navigation.assert_called_once_with(wait_until="domcontentloaded", timeout=5000)
+
+    def test_recovery_preserves_http_failure_category(self):
+        page = mock.Mock()
+        page.locator.return_value.inner_text.return_value = "验证失败"
+        page.goto.return_value = mock.Mock(status=400)
+        with self.assertRaises(get_info.LoginError) as caught:
+            get_info.recover_from_idm_error_page(page, "offline", 5, recovery_url="https://school.invalid/login")
+        self.assertEqual(caught.exception.reason, "page_load")
+
     def test_direct_login_surface_and_configuration_are_removed(self):
         source = Path(get_info.__file__).read_text(encoding="utf-8")
         self.assertFalse(hasattr(get_info, "get_token_direct"))

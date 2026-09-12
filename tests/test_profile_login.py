@@ -126,6 +126,34 @@ class ProfileLoginBoundaryTests(unittest.TestCase):
                     profile_login._timeout_value(value)
         self.assertEqual(profile_login._timeout_value("30"), 30.0)
 
+    def test_worker_preserves_only_allowlisted_login_reason(self):
+        class LoginFailure(Exception):
+            def __init__(self, reason):
+                super().__init__("sensitive response text")
+                self.reason = reason
+
+        for reason in ("page_load", "sensitive response text", ["not a string"]):
+            with self.subTest(reason=reason):
+                fake_login = types.ModuleType("get_info")
+                fake_login.get_token = mock.Mock(side_effect=LoginFailure(reason))
+                fake_api = types.ModuleType("school_api")
+                session = _FakeSession()
+                fake_api.create_school_session = lambda: session
+                fake_api.get_student_id = mock.Mock()
+                output = io.StringIO()
+                with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                    sys.modules, {"get_info": fake_login, "school_api": fake_api}
+                ), mock.patch.dict(os.environ), mock.patch.object(
+                    profile_login.sys, "stdin", io.StringIO(json.dumps({"username": "offline", "password": "fixture"}))
+                ), mock.patch.object(profile_login.sys, "stdout", output):
+                    code = profile_login._worker("cold", directory, 1.0)
+                result = json.loads(output.getvalue())
+                self.assertEqual(code, 1)
+                self.assertEqual(result.get("error_reason"), "page_load" if reason == "page_load" else None)
+                self.assertNotIn("sensitive response text", output.getvalue())
+                fake_api.get_student_id.assert_not_called()
+                self.assertTrue(session.closed)
+
     def test_non_linux_main_stops_before_credentials_prompt(self):
         with mock.patch.object(profile_login.sys, "platform", "darwin"), mock.patch.object(
             profile_login.getpass, "getpass", side_effect=AssertionError("prompted")

@@ -1,7 +1,6 @@
 import json
 import requests
 import urllib.parse
-import base64
 import re
 import threading
 import logging
@@ -202,6 +201,13 @@ def save_login_debug_artifacts(page, username, reason, error=None):
         logger.warning("账号 %s: 保存登录诊断失败：%s", safe_user, _redact_text(exc, [username]))
 
 
+def _check_login_page_response(response):
+    """Do not mistake an HTTP error document for a changed login form."""
+    if response is not None and response.status >= 400:
+        # URLs, headers and response bodies may contain authentication state.
+        raise LoginError("page_load", f"认证页面返回 HTTP {response.status}")
+
+
 def recover_from_idm_error_page(page, username, timeout, recovery_url=None, deadline=None):
     _remaining_seconds(deadline)
     try:
@@ -215,22 +221,26 @@ def recover_from_idm_error_page(page, username, timeout, recovery_url=None, dead
     try:
         _remaining_seconds(deadline)
         if recovery_url:
-            page.goto(recovery_url, wait_until="domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
+            response = page.goto(recovery_url, wait_until="domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
+            _check_login_page_response(response)
         else:
             link = page.locator('a:has-text("返回至登录页面")').first
             href = link.get_attribute("href", timeout=min(3000, _browser_timeout_ms(timeout, deadline)))
             if href:
                 logger.debug("账号 %s: 返回登录页面链接：%s", _debug_user_id(username), _redact_url(href)[:200])
-                page.goto(
+                response = page.goto(
                     urllib.parse.urljoin(page.url, href),
                     wait_until="domcontentloaded",
                     timeout=_browser_timeout_ms(timeout, deadline),
                 )
+                _check_login_page_response(response)
             else:
                 link.click(timeout=_browser_timeout_ms(timeout, deadline))
                 page.wait_for_load_state("domcontentloaded", timeout=_browser_timeout_ms(timeout, deadline))
         logger.debug("账号 %s: 返回登录页面后 URL: %s", _debug_user_id(username), _redact_url(page.url))
         return True
+    except LoginError:
+        raise
     except Exception as exc:
         save_login_debug_artifacts(page, username, "idm_error_recovery_failed", exc)
         raise LoginError("login_page_changed", f"统一认证验证失败后无法返回登录页面: {exc}")
@@ -261,25 +271,36 @@ def captcha_locator(page):
     return page.locator('img#kaptchaImage, img[src*="kaptcha"], img[src*="captcha"]').first
 
 
+def route_login_resource(route):
+    req = route.request
+    res_type = req.resource_type
+    url = req.url
+    if res_type == "font":
+        route.abort()
+    elif res_type == "image":
+        # 仅保留验证码图片和登录按钮图片，拦截其他非必要图片
+        if (
+            "kaptchaImage" in url
+            or "unified_button" in url
+            or urllib.parse.urlsplit(url).path == "/am/validate.code"
+        ):
+            route.continue_()
+        else:
+            route.abort()
+    else:
+        route.continue_()
+
+
 def get_captcha_image_bytes(page, captcha_el, timeout, deadline=None):
     _remaining_seconds(deadline)
     captcha_el.wait_for(state="visible", timeout=_browser_timeout_ms(timeout, deadline))
-    try:
-        handle = captcha_el.element_handle(timeout=_browser_timeout_ms(timeout, deadline))
-        if handle:
-            src = handle.get_attribute("src") or ""
-            if src.startswith("data:image"):
-                encoded = src.split(",", 1)[1]
-                return base64.b64decode(encoded)
-            if src:
-                response = page.request.get(
-                    urllib.parse.urljoin(page.url, src),
-                    timeout=_browser_timeout_ms(timeout, deadline),
-                )
-                if response.ok:
-                    return response.body()
-    except Exception as exc:
-        logger.debug("验证码图片请求获取失败，回退元素截图：%s", _redact_text(exc))
+    # Read the image already rendered in this browser session. Fetching its
+    # URL again can generate a new challenge and mutate the server session.
+    page.wait_for_function(
+        "img => img.complete && img.naturalWidth > 0",
+        arg=captcha_el.element_handle(timeout=_browser_timeout_ms(timeout, deadline)),
+        timeout=_browser_timeout_ms(timeout, deadline),
+    )
     return captcha_el.screenshot(timeout=_browser_timeout_ms(timeout, deadline))
 
 
@@ -314,8 +335,15 @@ def ensure_login_form(page, username, timeout, recovery_url=None, deadline=None)
         try:
             if button.count() > 0:
                 logger.debug("账号 %s: 正在点击统一认证登录按钮...", _debug_user_id(username))
-                button.click(timeout=_browser_timeout_ms(timeout, deadline))
+                with page.expect_navigation(
+                    wait_until="domcontentloaded",
+                    timeout=_browser_timeout_ms(timeout, deadline),
+                ) as navigation:
+                    button.click(timeout=_browser_timeout_ms(timeout, deadline))
+                _check_login_page_response(navigation.value)
                 continue
+        except LoginError:
+            raise
         except Exception as exc:
             logger.debug(
                 "账号 %s: 点击统一认证登录按钮失败 (第 %s/3 次): %s",
@@ -370,6 +398,142 @@ def _browser_timeout_ms(timeout, deadline):
         return max(1, int(float(bounded) * 1000))
     except (TypeError, ValueError):
         return 1000
+
+
+def _login_user_agent(browser):
+    """Return a User-Agent the school WAF accepts, or ``None`` for the default.
+
+    Headless Chromium advertises ``HeadlessChrome`` in its User-Agent.  The
+    unified login host answers HTTP 400 for that token on the federation hop
+    even when every other request header is identical, so a headless run has
+    to present an ordinary Chrome User-Agent.  The version is taken from the
+    running browser so the string does not go stale.
+    """
+    version = str(getattr(browser, "version", "") or "").strip()
+    match = re.match(r"(\d+)", version)
+    if not match:
+        return None
+    return (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{match.group(1)}.0.0.0 Safari/537.36"
+    )
+
+
+# The CAS hop hands the browser a pair of opaque base62 device cookies that
+# the browser then replays to the IDM host.
+_OPAQUE_COOKIE_NAME = re.compile(r"^[0-9A-Za-z]{13}$")
+
+
+def _drop_federation_cookies(context, login_host, username):
+    """Remove the CAS hop's opaque device cookies before submitting the form.
+
+    ``uaaap.swu.edu.cn`` sets two opaque cookies that are replayed to
+    ``idm.swu.edu.cn``.  While they are present, ``POST /am/UI/Login`` is
+    answered with HTTP 400 and an empty body; after removing exactly those
+    cookies the same POST reaches the authentication service and returns its
+    normal result page.  Only cookies scoped to the login host are touched,
+    so the CAS session and every other domain stay intact.
+    """
+    host = (login_host or "").rstrip(".").lower()
+    if not host:
+        return
+    try:
+        cookies = context.cookies()
+    except Exception as exc:
+        logger.debug("账号 %s: 读取浏览器 Cookie 失败：%s", _debug_user_id(username), _redact_text(exc))
+        return
+
+    def on_login_host(cookie):
+        return (cookie.get("domain") or "").lstrip(".").lower() == host
+
+    dropped = {
+        cookie["name"]
+        for cookie in cookies
+        if on_login_host(cookie) and _OPAQUE_COOKIE_NAME.match(cookie.get("name") or "")
+    }
+    if not dropped:
+        return
+
+    keep = []
+    for cookie in cookies:
+        if on_login_host(cookie) and cookie["name"] in dropped:
+            continue
+        entry = {
+            "name": cookie["name"],
+            "value": cookie["value"],
+            "domain": cookie["domain"],
+            "path": cookie.get("path") or "/",
+            "httpOnly": bool(cookie.get("httpOnly")),
+            "secure": bool(cookie.get("secure")),
+        }
+        if cookie.get("sameSite"):
+            entry["sameSite"] = cookie["sameSite"]
+        expires = cookie.get("expires")
+        if isinstance(expires, (int, float)) and expires > 0:
+            entry["expires"] = expires
+        keep.append(entry)
+
+    try:
+        context.clear_cookies()
+        if keep:
+            context.add_cookies(keep)
+    except Exception as exc:
+        logger.debug("账号 %s: 清除认证跳转遗留 Cookie 失败：%s", _debug_user_id(username), _redact_text(exc))
+        return
+    logger.debug(
+        "账号 %s: 已清除认证跳转遗留 Cookie：%s",
+        _debug_user_id(username),
+        ",".join(sorted(dropped)),
+    )
+
+
+def _recover_blocked_oauth_hop(
+    page,
+    context,
+    username,
+    login_entry_url,
+    redirect_target,
+    timeout,
+    deadline=None,
+):
+    """Re-drive the post-login OAuth hop after a device-cookie rejection.
+
+    The successful login response re-issues the school's device cookies, and
+    the OAuth hop that follows is answered with HTTP 400 while they are
+    present.  Chromium follows that redirect internally, so the rejected hop
+    cannot be intercepted; dropping the cookies and requesting the recorded
+    redirect target instead hands the browser straight to the portal.
+    """
+    host = _url_hostname(page.url)
+    target = redirect_target or page.url
+    # The login response points at the plain-HTTP form of the authorize URL,
+    # whose redirect loses the authenticated session and bounces back to the
+    # login form.  Replaying the same URL over HTTPS reaches the portal.
+    if target.startswith("http://"):
+        target = "https://" + target[len("http://"):]
+    logger.debug(
+        "账号 %s: 登录跳转停留在 %s，尝试清除设备 Cookie 后重试。",
+        _debug_user_id(username),
+        host or "<unknown>",
+    )
+    _drop_federation_cookies(context, _url_hostname(target) or host, username)
+    try:
+        logger.debug("账号 %s: 重新请求登录跳转地址以绕过认证拦截。", _debug_user_id(username))
+        response = page.goto(
+            target,
+            wait_until="domcontentloaded",
+            timeout=_browser_timeout_ms(timeout, deadline),
+        )
+        logger.debug(
+            "账号 %s: 重试跳转返回 HTTP %s，当前 URL: %s",
+            _debug_user_id(username),
+            getattr(response, "status", None),
+            _redact_url(page.url),
+        )
+    except Exception as exc:
+        logger.debug("账号 %s: 重试登录跳转失败：%s", _debug_user_id(username), _redact_text(exc))
+        return False
+    return _wait_for_login_result(page, login_entry_url, timeout, deadline=deadline)
 
 
 _load_cached_token = load_cached_token
@@ -467,6 +631,10 @@ def _wait_for_login_result(page, login_entry_url, timeout, deadline=None):
     wait_for_function = getattr(page, "wait_for_function", None)
     if wait_for_function is not None:
         expression = """({ entryUrl }) => {
+            const popup = document.querySelector('.pop .ctnTxt');
+            if (popup && popup.getClientRects().length && popup.innerText.trim()) {
+                return true;
+            }
             const parsed = new URL(window.location.href);
             const host = (parsed.hostname || '').toLowerCase().replace(/\\.$/, '');
             if (host !== 'of.swu.edu.cn' && !host.endsWith('.of.swu.edu.cn')) {
@@ -631,45 +799,26 @@ def get_token(
     # The context manager imports Playwright only after a cold-login slot is
     # acquired, keeping the cached/API path entirely browser-free.
     with _browser_login_slot(deadline), _browser_playwright() as p:
-        launch_options = {
-            "headless": True,
-            "timeout": _browser_timeout_ms(timeout, deadline),
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--password-store=basic"
-            ]
-        }
-        launch_options["args"].append("--no-proxy-server")
+        args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--password-store=basic",
+            "--no-proxy-server",
+        ]
         browser = p.chromium.launch(
-            **launch_options
+            headless=True,
+            timeout=_browser_timeout_ms(timeout, deadline),
+            args=args,
         )
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent=_login_user_agent(browser),
         )
         page = context.new_page()
-
-        # 细粒度静态资源拦截以优化页面加载速度
-        def handle_route(route):
-            req = route.request
-            res_type = req.resource_type
-            url = req.url
-            if res_type == "font":
-                route.abort()
-            elif res_type == "image":
-                # 仅保留验证码图片和登录按钮图片，拦截其他非必要图片
-                if "kaptchaImage" in url or "unified_button" in url:
-                    route.continue_()
-                else:
-                    route.abort()
-            else:
-                route.continue_()
-
-        page.route("**/*", handle_route)
+        page.route("**/*", route_login_resource)
 
         try:
             logger.debug("账号 %s: 正在访问 CAS 登录页面...", _debug_user_id(username))
@@ -677,12 +826,15 @@ def get_token(
             for attempt in range(1, 3):
                 _remaining_seconds(deadline)
                 try:
-                    page.goto(
+                    response = page.goto(
                         cas_url,
                         wait_until="domcontentloaded",
                         timeout=_browser_timeout_ms(timeout, deadline),
                     )
+                    _check_login_page_response(response)
                     break
+                except LoginError:
+                    raise
                 except Exception as e:
                     _remaining_seconds(deadline)
                     if attempt == 2:
@@ -725,24 +877,99 @@ def get_token(
                 code = classify_captcha(img_bytes)
                 logger.debug("账号 %s: 已识别验证码", _debug_user_id(username))
 
-                captcha_input_locator(page).fill(
-                    code,
-                    timeout=_browser_timeout_ms(timeout, deadline),
-                )
+                captcha_input = captcha_input_locator(page)
+                # Fill the field in one step.  Any keystroke or clear would
+                # fire the IDM page's ``keyup`` handler, which calls
+                # ``verifyCode()``; that AJAX probe answers HTTP 400 today, so
+                # the handler treats every code as wrong and flips the page's
+                # global ``state`` to false, after which ``portalLogin()``
+                # returns early and the form is never submitted at all.  A
+                # single ``fill`` leaves ``state`` true so the server
+                # validates the code together with the credentials.
+                captcha_input.fill(code, timeout=_browser_timeout_ms(timeout, deadline))
+
+                # The authentication service answers the login POST with HTTP
+                # 400 while the CAS hop's device cookies are present, and the
+                # page keeps re-creating them, so clear them right before the
+                # submit instead of once when the form first appears.
+                # The host has to be resolved here: the entry URL still points
+                # at the CAS hop, while the form now lives on the login host.
+                login_host = _url_hostname(page.url)
+                _drop_federation_cookies(context, login_host, username)
 
                 # Click login
                 logger.debug("账号 %s: 提交表单中...", _debug_user_id(username))
-                submit_button_locator(page).click(timeout=_browser_timeout_ms(timeout, deadline))
+                redirect_target = None
+                try:
+                    with page.expect_response(
+                        lambda response: getattr(response.request, "method", "") == "POST"
+                        and "/am/UI/Login" in response.url,
+                        timeout=min(5000, _browser_timeout_ms(timeout, deadline)),
+                    ) as login_response:
+                        submit_button_locator(page).click(
+                            timeout=_browser_timeout_ms(timeout, deadline)
+                        )
+                    redirect_target = (login_response.value.headers or {}).get("location")
+                    logger.debug(
+                        "账号 %s: 登录响应 HTTP %s，跳转目标 %s",
+                        _debug_user_id(username),
+                        login_response.value.status,
+                        "已获取" if redirect_target else "缺失",
+                    )
+                except Exception as exc:
+                    # A missing response means the page refused to submit; the
+                    # captcha/error handling below reports that case.
+                    logger.debug(
+                        "账号 %s: 未观察到登录表单提交响应：%s",
+                        _debug_user_id(username),
+                        _redact_text(exc),
+                    )
+
+                if redirect_target:
+                    # The successful login response re-issues the device
+                    # cookies the authentication service rejects, and the
+                    # redirect it triggers is answered with HTTP 400 before
+                    # bouncing back to the login form.  Clear them right away
+                    # and request the target over HTTPS so the authenticated
+                    # session survives the hop.
+                    _drop_federation_cookies(context, login_host, username)
+                    target = redirect_target
+                    if target.startswith("http://"):
+                        target = "https://" + target[len("http://"):]
+                    try:
+                        page.goto(
+                            target,
+                            wait_until="domcontentloaded",
+                            timeout=_browser_timeout_ms(timeout, deadline),
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "账号 %s: 直接完成登录跳转失败：%s",
+                            _debug_user_id(username),
+                            _redact_text(exc),
+                        )
 
                 # Wait for an explicit portal-host ticket/token condition.
                 # Waiting for network quiescence is both slower and brittle on
                 # pages that keep analytics or polling requests open.
+                # Without a recorded redirect there is nothing to wait for, so
+                # keep that window short and go straight to the retry path.
                 redirected = _wait_for_login_result(
                     page,
                     login_entry_url,
-                    timeout,
+                    timeout if redirect_target else min(5, timeout),
                     deadline=deadline,
                 )
+                if not redirected and redirect_target:
+                    redirected = _recover_blocked_oauth_hop(
+                        page,
+                        context,
+                        username,
+                        login_entry_url,
+                        redirect_target,
+                        timeout,
+                        deadline=deadline,
+                    )
                 logger.debug(
                     "账号 %s: 登录结果检查完成，当前 URL: %s",
                     _debug_user_id(username),
@@ -757,7 +984,7 @@ def get_token(
                 # Check for visible error message
                 error_msg = ""
                 try:
-                    error_msg = page.evaluate("() => { const el = document.querySelector('.error, #error, .errorMessage, #errorMessage, .messager-body'); return el ? el.innerText : ''; }")
+                    error_msg = page.evaluate("() => { const el = document.querySelector('.pop .ctnTxt, .error, #error, .errorMessage, #errorMessage, .messager-body'); return el ? el.innerText : ''; }")
                 except Exception:
                     pass
 
@@ -769,8 +996,17 @@ def get_token(
                         if "验证码" not in error_msg:
                             raise LoginError("credential", f"账号或密码错误: {safe_error_msg}")
 
+                if "验证码" in error_msg:
+                    confirm = page.locator(".pop .confirm").first
+                    if confirm.count() and confirm.is_visible():
+                        confirm.click(timeout=_browser_timeout_ms(timeout, deadline))
+
                 # If not redirected and no explicit credential error, refresh captcha and try again
                 try:
+                    # Back off a little: the school rejects repeated
+                    # submissions from one client for a short while, and
+                    # retrying instantly only deepens that penalty.
+                    time.sleep(min(3, max(0.0, _remaining_seconds(deadline) or 3)))
                     logger.debug("账号 %s: 验证码识别错误或重定向未触发，刷新验证码重试...", _debug_user_id(username))
                     captcha_el.click(timeout=_browser_timeout_ms(timeout, deadline))
                 except Exception:

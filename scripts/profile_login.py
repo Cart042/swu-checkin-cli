@@ -286,8 +286,16 @@ def _worker(scenario: str, config_dir: str, timeout: float) -> int:
             del token, student_id
     except Exception as exc:
         # Error text can contain URLs, account data, or response text.  Return
-        # only its class; the parent never forwards captured logs.
+        # its class and an allowlisted category; never forward captured logs.
         result["error_type"] = type(exc).__name__
+        # Preserve only fixed diagnostic categories, never arbitrary exception
+        # messages, URLs, or response content.
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, str) and reason in {
+            "credential", "page_load", "captcha", "token_extract",
+            "login_page_changed", "unknown",
+        }:
+            result["error_reason"] = reason
     finally:
         if session is not None:
             close = getattr(session, "close", None)
