@@ -1,13 +1,7 @@
 name: SWU Check-in
 
 on:
-  schedule:
-    # 每天北京时间 21:05 自动运行。GitHub cron 使用 UTC 时间。
-    #
-    # 定时是否会触发由工作流自身的启用状态决定（Actions 页面 Enable/Disable
-    # workflow，或 gh workflow enable/disable）。状态保存在 GitHub 上而不是仓库
-    # 里，GitHub 会在仓库长期不活跃后自动停用，README 里有排查说明。
-    - cron: "5 13 * * *"
+  # 生产环境的每日定时由 VPS systemd timer 负责；GitHub Actions 仅保留手动补签 / 调试入口。
   workflow_dispatch:
     inputs:
       debug:
