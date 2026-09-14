@@ -1,7 +1,10 @@
 name: SWU Check-in
 
 on:
-  # 生产环境的每日定时由 VPS systemd timer 负责；GitHub Actions 仅保留手动补签 / 调试入口。
+  schedule:
+    # GitHub cron 使用 UTC；13:05 UTC = 北京时间 21:05。
+    # 定时执行需要仓库变量 SWU_SCHEDULE_ENABLED=true；官方仓库生产定时由 VPS systemd 负责。
+    - cron: "5 13 * * *"
   workflow_dispatch:
     inputs:
       debug:
@@ -19,6 +22,8 @@ concurrency:
 
 jobs:
   check-in:
+    # 手动触发始终允许；schedule 只有显式设置 SWU_SCHEDULE_ENABLED=true 才执行。
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.SWU_SCHEDULE_ENABLED == 'true' }}
     # 官方仓库使用专用的 self-hosted runner；fork 自动回退到 GitHub-hosted runner。
     runs-on: ${{ github.repository == 'Cart042/swu-checkin-cli' && 'swu-checkin' || 'ubuntu-latest' }}
     timeout-minutes: 20
