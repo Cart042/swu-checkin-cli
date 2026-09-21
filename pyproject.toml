@@ -39,7 +39,7 @@ swu-checkin = "swu_checkin.cli:main"
 [project.optional-dependencies]
 # 静态检查与格式化工具，供本地开发和 Fast CI 使用。
 dev = [
-    "ruff==0.16.6",
+    "ruff==0.16.8",
     "mypy==2.3.1",
     "types-requests>=2.32.0",
 ]
