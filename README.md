@@ -191,6 +191,40 @@ python scripts/smoke_runtime.py
 
 安装命令使用 Playwright 的 [Chromium headless shell](https://playwright.dev/python/docs/browsers#chromium-headless-shell) 模式。PR CI 和定时签到工作流都通过 `actions/setup-python` 按 `requirements.txt` 和 `pyproject.toml` 启用 pip 缓存；相关配置见 [setup-python 的依赖缓存说明](https://github.com/actions/setup-python#caching-packages-dependencies)。缓存只加速 Python 依赖安装，运行内存变化应以实际测量为准。
 
+## Telegram 手动签到
+
+先按现有 Telegram 推送配置填写 `PUSH_TELEGRAM_BOT_TOKEN` 和
+`PUSH_TELEGRAM_CHAT_ID`。Controller 只接受这个 Chat ID 对应的私人聊天，
+群聊成员和其他用户不能触发签到。
+
+在与正常签到相同的环境和 `SWU_CONFIG_DIR` 下启动：
+
+```bash
+python -m swu_checkin.telegram_control
+```
+
+建议用 systemd 常驻，例如：
+
+```ini
+[Unit]
+Description=SWU Telegram manual check-in controller
+After=network-online.target
+
+[Service]
+User=swu-checkin
+WorkingDirectory=/opt/swu-checkin-cli
+Environment=SWU_CONFIG_DIR=/opt/swu-checkin-cli/data
+ExecStart=/opt/swu-checkin-cli/.venv/bin/python -m swu_checkin.telegram_control
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+一次完成服务配置并启动后，Telegram 私聊 Bot 发送 `/checkin` 即可手动签到，
+无需再登录 SSH。原有 GitHub Actions 的 `workflow_dispatch` 仍可作为备用手动入口。
+
 ## Docker
 
 Docker 镜像使用 Python 3.11 和 Playwright Chromium headless shell，并以非 root 用户（uid/gid `10001`）运行：容器内长期保存账号、Token 缓存、日志和运行锁。推荐将 `/data` 挂载到宿主机保存账号和缓存：
