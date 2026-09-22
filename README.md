@@ -17,7 +17,7 @@
 - 使用 `users.json` 或环境变量管理多个账号。
 - 用 `swu-checkin -m`（或 `python check_in.py -m`）打开数字菜单，配置账号、并发和推送。
 - 使用 Docker Compose 在 VPS 上运行一次性任务。
-- 使用 GitHub Actions 在每天北京时间 21:05（UTC 13:05）定时运行，也可以手动运行。
+- 使用 GitHub Actions 手动运行，也支持 `schedule` 定时触发（不推荐将其用于要求准点执行的正式签到任务）。
 - 支持钉钉、企业微信、Bark、Server 酱、PushDeer 和 Telegram 推送。
 
 学校官网的网络出口和登录页策略会影响运行结果。运行主机需要能够直接访问学校官网和统一认证页面。
@@ -113,6 +113,8 @@ swu-checkin -m
 菜单写入的账号文件和 `.env` 位于当前配置目录。账号列表和日志中的账号标识会尽量使用掩码显示。
 
 ## GitHub Actions
+
+> **不推荐使用 GitHub Actions 的 `schedule` 作为正式定时签到方案。** GitHub 的定时工作流不保证在 cron 指定的分钟准点启动，实际运行中经常会出现延迟，繁忙时延迟可能更明显。因此，如果你要求签到任务尽量按设定时间执行，建议在 VPS 上使用 `systemd timer` 或 `cron`；GitHub Actions 更适合作为手动触发、备用执行或测试入口。
 
 工作流文件是 `.github/workflows/swu-check.yml`。推荐在仓库的 **Settings → Secrets and variables → Actions** 中添加一个 `SWU_USERS` Secret，用一个 JSON 数组保存一个或多个账号：
 
