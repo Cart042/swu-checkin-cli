@@ -203,7 +203,9 @@ python scripts/smoke_runtime.py
 python -m swu_checkin.telegram_control
 ```
 
-建议用 systemd 常驻，例如：
+Controller 会启动现有的 `python -m swu_checkin` 子进程，因此 systemd 服务应复用正常签到的同一
+`User`、`SWU_CONFIG_DIR`、`HOME` 和 `PLAYWRIGHT_BROWSERS_PATH`，不要另建第二套配置或浏览器缓存。
+以下以推荐的生产布局为例：
 
 ```ini
 [Unit]
@@ -213,7 +215,9 @@ After=network-online.target
 [Service]
 User=swu-checkin
 WorkingDirectory=/opt/swu-checkin-cli
-Environment=SWU_CONFIG_DIR=/opt/swu-checkin-cli/data
+Environment=HOME=/var/lib/swu-checkin
+Environment=SWU_CONFIG_DIR=/var/lib/swu-checkin
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/lib/swu-checkin/ms-playwright
 ExecStart=/opt/swu-checkin-cli/.venv/bin/python -m swu_checkin.telegram_control
 Restart=always
 RestartSec=5
@@ -221,6 +225,10 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 ```
+
+如果现有 `swu-checkin.service` 使用了不同路径，直接复用其中对应的运行环境即可；
+Controller 会从同一个 `SWU_CONFIG_DIR/.env` 读取 Telegram 配置，并让手动签到与定时签到共享账号、
+Token 缓存和 Chromium。
 
 一次完成服务配置并启动后，Telegram 私聊 Bot 发送 `/checkin` 即可手动签到，
 无需再登录 SSH。原有 GitHub Actions 的 `workflow_dispatch` 仍可作为备用手动入口。
