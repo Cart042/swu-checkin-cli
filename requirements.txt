@@ -3,4 +3,4 @@
 requests==2.34.2
 playwright==1.62.0
 ddddocr==1.6.1
-python-dotenv==1.2.3
+python-dotenv==1.2.4

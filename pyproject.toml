@@ -26,7 +26,7 @@ dependencies = [
     "requests==2.34.2",
     "playwright==1.62.0",
     "ddddocr==1.6.1",
-    "python-dotenv==1.2.3",
+    "python-dotenv==1.2.4",
 ]
 
 [project.urls]
@@ -47,7 +47,7 @@ dev = [
 # Chromium 与 ddddocr 只在 Runtime CI 中安装，普通单元测试不依赖它们。
 test = [
     "requests==2.34.2",
-    "python-dotenv==1.2.3",
+    "python-dotenv==1.2.4",
 ]
 
 [tool.setuptools]
